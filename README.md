@@ -312,6 +312,48 @@ Notes per platform:
 * **Web** – text recognition is a no-op; the stream simply never
   emits.
 
+#### Still-image OCR
+
+`MobileScannerController.analyzeImageText(path, {script})` runs the
+same on-device recognizer over a single image (gallery pick, share
+sheet, clipboard paste). It mirrors `analyzeImage` and returns the
+same `TextCapture` shape the live stream uses, so consumers can share
+their post-processing path:
+
+```dart
+final result = await controller.analyzeImageText(
+  '/path/to/image.png',
+  script: TextRecognitionScript.latin,
+);
+print(result?.text);
+```
+
+It throws `MobileScannerTextException` on recognizer errors and
+`UnsupportedError` on platforms / OS versions that don't support
+still-image OCR (notably iOS 12 and the iOS Simulator, which can't
+run the Vision framework on the GPU).
+
+### Average luma signal
+
+For low-light affordances (e.g. nudging the user to tap the torch)
+opt into the average luma sampler:
+
+```dart
+final controller = MobileScannerController(
+  lumaSampling: const LumaSampling(enabled: true, throttleMs: 500),
+);
+
+controller.luma.listen((double sample) {
+  // sample is normalized to [0, 1]; ~0.10 is roughly "dim room"
+  if (sample < 0.10) suggestTorch();
+});
+```
+
+Sampling reads ~256 pixels off the Y plane (or a BT.601 BGRA
+approximation) per tick and is independent of the barcode/text
+throttles, so the signal continues even while detection is paused.
+A no-op on the web.
+
 ## Known Limitations
 
 ### `rawBytes` on iOS and macOS

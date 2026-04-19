@@ -65,6 +65,25 @@ class MobileScannerHandler(
 
     private var analyzerResult: MethodChannel.Result? = null
 
+    /// Result of a still-image text recognition request. Held while the
+    /// async recognizer runs so we can complete it on the main thread
+    /// without racing with another `analyzeImageText` invocation.
+    private var textAnalyzerResult: MethodChannel.Result? = null
+
+    private val textAnalyzerSuccessCallback: (Map<String, Any?>?) -> Unit = { payload ->
+        Handler(Looper.getMainLooper()).post {
+            textAnalyzerResult?.success(payload)
+            textAnalyzerResult = null
+        }
+    }
+
+    private val textAnalyzerErrorCallback: (String) -> Unit = { error ->
+        Handler(Looper.getMainLooper()).post {
+            textAnalyzerResult?.error(MobileScannerErrorCodes.TEXT_ERROR, error, null)
+            textAnalyzerResult = null
+        }
+    }
+
     private val callback: MobileScannerCallback = { barcodes: List<Map<String, Any?>>, image: ByteArray?, width: Int?, height: Int? ->
         barcodeHandler.publishEvent(mapOf(
             "name" to "barcode",
@@ -91,6 +110,12 @@ class MobileScannerHandler(
 
     private val textErrorCallback: TextRecognitionErrorCallback = { error: String ->
         barcodeHandler.publishError(MobileScannerErrorCodes.TEXT_ERROR, error, null)
+    }
+
+    /// Forward average luma samples through the same event channel as
+    /// barcodes / text. The Dart side discriminates by `name == "luma"`.
+    private val lumaCallback: (Double) -> Unit = { sample ->
+        barcodeHandler.publishEvent(mapOf("name" to "luma", "data" to sample))
     }
 
     private var methodChannel: MethodChannel? = null
@@ -165,6 +190,7 @@ class MobileScannerHandler(
             "toggleTorch" -> toggleTorch(result)
             "getSupportedLenses" -> getSupportedLenses(result)
             "analyzeImage" -> analyzeImage(call, result)
+            "analyzeImageText" -> analyzeImageText(call, result)
             "setScale" -> setScale(call, result)
             "resetScale" -> resetScale(result)
             "updateScanWindow" -> updateScanWindow(call, result)
@@ -204,6 +230,13 @@ class MobileScannerHandler(
             (textRecognitionConfig?.get("throttleMs") as? Number)?.toLong() ?: 400L
         val textRecognitionRespectScanWindow: Boolean =
             (textRecognitionConfig?.get("respectScanWindow") as? Boolean) ?: true
+
+        // Optional luma sampling configuration. Same shape as text
+        // recognition: missing map / `enabled == false` keeps it off.
+        val lumaConfig: Map<*, *>? = call.argument<Map<*, *>>("lumaSampling")
+        val lumaEnabled: Boolean = (lumaConfig?.get("enabled") as? Boolean) ?: false
+        val lumaThrottleMs: Long =
+            (lumaConfig?.get("throttleMs") as? Number)?.toLong() ?: 500L
 
         val barcodeScannerOptions: BarcodeScannerOptions? = buildBarcodeScannerOptions(formats, autoZoom)
 
@@ -280,6 +313,8 @@ class MobileScannerHandler(
             textRecognitionScript = textRecognitionScript,
             textRecognitionThrottleMillis = textRecognitionThrottleMs,
             textRecognitionRespectsScanWindow = textRecognitionRespectScanWindow,
+            lumaCallback = if (lumaEnabled) lumaCallback else null,
+            lumaThrottleMillis = lumaThrottleMs,
         )
     }
 
@@ -317,6 +352,34 @@ class MobileScannerHandler(
             buildBarcodeScannerOptions(formats, false),
             analyzeImageSuccessCallback,
             analyzeImageErrorCallback)
+    }
+
+    /**
+     * Run on-device text recognition over a single still image picked
+     * from the gallery / clipboard / file system. Mirrors [analyzeImage]
+     * but for OCR. Results are posted back as a `TextCapture` map (or
+     * `null` when nothing was recognized).
+     */
+    private fun analyzeImageText(call: MethodCall, result: MethodChannel.Result) {
+        if (textAnalyzerResult != null) {
+            result.error(
+                MobileScannerErrorCodes.TEXT_ERROR,
+                "Another analyzeImageText() call is already in progress.",
+                null,
+            )
+            return
+        }
+        textAnalyzerResult = result
+
+        val filePath: String = call.argument<String>("filePath")!!
+        val script: String? = call.argument<String>("script")
+
+        mobileScanner!!.analyzeImageText(
+            Uri.fromFile(File(filePath)),
+            script,
+            textAnalyzerSuccessCallback,
+            textAnalyzerErrorCallback,
+        )
     }
 
     private fun toggleTorch(result: MethodChannel.Result) {

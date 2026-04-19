@@ -4,6 +4,7 @@ import 'package:mobile_scanner/src/enums/barcode_format.dart';
 import 'package:mobile_scanner/src/enums/camera_facing.dart';
 import 'package:mobile_scanner/src/enums/camera_lens_type.dart';
 import 'package:mobile_scanner/src/enums/detection_speed.dart';
+import 'package:mobile_scanner/src/objects/luma_sampling.dart';
 import 'package:mobile_scanner/src/objects/text_recognition_options.dart';
 
 /// This class defines the different start options for the mobile scanner.
@@ -22,6 +23,7 @@ class StartOptions {
     required this.autoZoom,
     required this.initialZoom,
     this.textRecognition = TextRecognitionOptions.disabled,
+    this.lumaSampling = LumaSampling.disabled,
   });
 
   /// The direction for the camera.
@@ -79,6 +81,16 @@ class StartOptions {
   /// Currently supported on Android, iOS and macOS.
   final TextRecognitionOptions textRecognition;
 
+  /// Configuration for the average-luma signal emitted alongside the
+  /// barcode and text streams.
+  ///
+  /// Defaults to [LumaSampling.disabled] so the native side does no
+  /// extra work unless a consumer opts in. When enabled, samples are
+  /// posted to the controller's `luma` stream.
+  ///
+  /// Currently supported on Android, iOS and macOS.
+  final LumaSampling lumaSampling;
+
   /// Converts this object to a map.
   Map<String, Object?> toMap() {
     return <String, Object?>{
@@ -99,6 +111,7 @@ class StartOptions {
       'autoZoom': autoZoom,
       'initialZoom': initialZoom,
       if (textRecognition.enabled) 'textRecognition': textRecognition.toMap(),
+      if (lumaSampling.enabled) 'lumaSampling': lumaSampling.toMap(),
     };
   }
 }

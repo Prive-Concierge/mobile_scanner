@@ -8,6 +8,7 @@ import 'package:mobile_scanner/src/enums/camera_facing.dart';
 import 'package:mobile_scanner/src/enums/camera_lens_type.dart';
 import 'package:mobile_scanner/src/enums/mobile_scanner_authorization_state.dart';
 import 'package:mobile_scanner/src/enums/mobile_scanner_error_code.dart';
+import 'package:mobile_scanner/src/enums/text_recognition_script.dart';
 import 'package:mobile_scanner/src/enums/torch_state.dart';
 import 'package:mobile_scanner/src/method_channel/android_surface_producer_delegate.dart';
 import 'package:mobile_scanner/src/method_channel/rotated_preview.dart';
@@ -39,6 +40,10 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   @visibleForTesting
   static const String kTextErrorEventName = 'MOBILE_SCANNER_TEXT_ERROR';
 
+  /// The name of the average-luma sample event.
+  @visibleForTesting
+  static const String kLumaEventName = 'luma';
+
   /// The name of the error event that is sent when an operation is not
   /// supported.
   @visibleForTesting
@@ -64,6 +69,10 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   /// The name of the method that analyzes an image for barcodes.
   @visibleForTesting
   static const String kAnalyzeImageMethodName = 'analyzeImage';
+
+  /// The name of the method that runs text recognition over a still image.
+  @visibleForTesting
+  static const String kAnalyzeImageTextMethodName = 'analyzeImageText';
 
   /// The name of the method that resets the zoom scale.
   @visibleForTesting
@@ -302,6 +311,21 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
         .handleError(_parseTextError);
   }
 
+  /// Handle incoming luma sample events. Values are clamped to
+  /// `[0, 1]` so consumers don't have to defensively bound them.
+  @override
+  Stream<double> get lumaStream {
+    return eventsStream
+        .where((event) => event['name'] == kLumaEventName)
+        .map((event) {
+      final raw = event['data'];
+      if (raw is num) {
+        return raw.toDouble().clamp(0.0, 1.0);
+      }
+      return 0.0;
+    });
+  }
+
   @override
   Stream<TorchState> get torchStateStream {
     return eventsStream
@@ -341,6 +365,31 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
       // Handle any errors from analyze image requests.
       if (error.code == kBarcodeErrorEventName) {
         throw MobileScannerBarcodeException(error.message);
+      }
+
+      if (error.code == kUnsupportdOperationErrorEventName) {
+        throw UnsupportedError(error.message ?? 'Unsupported operation.');
+      }
+
+      return null;
+    }
+  }
+
+  @override
+  Future<TextCapture?> analyzeImageText(
+    String path, {
+    TextRecognitionScript script = TextRecognitionScript.latin,
+  }) async {
+    try {
+      final result = await methodChannel.invokeMapMethod<Object?, Object?>(
+        kAnalyzeImageTextMethodName,
+        {'filePath': path, 'script': script.rawValue},
+      );
+
+      return _parseText(result);
+    } on PlatformException catch (error) {
+      if (error.code == kTextErrorEventName) {
+        throw MobileScannerTextException(error.message);
       }
 
       if (error.code == kUnsupportdOperationErrorEventName) {

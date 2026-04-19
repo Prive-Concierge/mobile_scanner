@@ -100,6 +100,14 @@ class MobileScanner(
     private var textRecognitionThrottleMs: Long = 400
     @Volatile private var textNextRunAt: Long = 0L
 
+    /// Luma sampling runtime state. Sampling itself is allocation-free
+    /// and runs synchronously on the analyzer thread, so it does not
+    /// participate in the imageProxy ref count.
+    private var lumaEnabled: Boolean = false
+    private var lumaThrottleMs: Long = 500
+    @Volatile private var lumaNextRunAt: Long = 0L
+    private var lumaCallback: ((Double) -> Unit)? = null
+
     companion object {
         // Configure the `ProcessCameraProvider` to only log errors.
         // This prevents the informational log spam from CameraX.
@@ -164,6 +172,20 @@ class MobileScanner(
             && now >= textNextRunAt
         if (shouldRunText) {
             textNextRunAt = now + textRecognitionThrottleMs
+        }
+
+        // Sample average luma off the Y plane on a coarse grid. Cheap
+        // enough to do synchronously and independent of the imageProxy
+        // ref count.
+        if (lumaEnabled && now >= lumaNextRunAt) {
+            lumaNextRunAt = now + lumaThrottleMs
+            try {
+                val luma = sampleLuma(mediaImage)
+                lumaCallback?.invoke(luma)
+            } catch (_: Throwable) {
+                // Sampling failures must never bring down the analyzer
+                // pipeline. The next frame will retry.
+            }
         }
 
         // Reference count for releasing the imageProxy. 1 for the barcode
@@ -426,6 +448,43 @@ class MobileScanner(
     }
 
     /**
+     * Sample the average luma (Y plane) of [mediaImage] on a coarse
+     * 16×16 grid and normalize to the `[0, 1]` range. Allocation-free
+     * so it can run on every analyzer tick without GC pressure.
+     */
+    private fun sampleLuma(mediaImage: android.media.Image): Double {
+        val plane = mediaImage.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val width = mediaImage.width
+        val height = mediaImage.height
+        if (width <= 0 || height <= 0) return 0.0
+
+        val stepY = (height / 16).coerceAtLeast(1)
+        val stepX = (width / 16).coerceAtLeast(1)
+        var sum = 0L
+        var count = 0
+        var y = 0
+        val limit = buffer.limit()
+        while (y < height) {
+            val rowOffset = y * rowStride
+            var x = 0
+            while (x < width) {
+                val idx = rowOffset + x * pixelStride
+                if (idx in 0 until limit) {
+                    sum += (buffer.get(idx).toInt() and 0xFF)
+                    count++
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        if (count == 0) return 0.0
+        return (sum.toDouble() / count.toDouble()) / 255.0
+    }
+
+    /**
      * Create a {@link Preview.SurfaceProvider} that specifies how to provide a {@link Surface} to a
      * {@code Preview}.
      */
@@ -559,6 +618,8 @@ class MobileScanner(
         textRecognitionScript: String? = null,
         textRecognitionThrottleMillis: Long = 400L,
         textRecognitionRespectsScanWindow: Boolean = true,
+        lumaCallback: ((Double) -> Unit)? = null,
+        lumaThrottleMillis: Long = 500L,
     ) {
         this.detectionSpeed = detectionSpeed
         this.detectionTimeout = detectionTimeout
@@ -576,6 +637,13 @@ class MobileScanner(
         if (textRecognitionEnabled) {
             this.textRecognizer = textRecognizerFactory(textRecognitionScript)
         }
+
+        // Wire up luma sampling. Independent of text recognition so a
+        // consumer can opt into either or both.
+        this.lumaEnabled = lumaCallback != null
+        this.lumaThrottleMs = lumaThrottleMillis.coerceAtLeast(0L)
+        this.lumaCallback = lumaCallback
+        this.lumaNextRunAt = 0L
 
         
         if (camera?.cameraInfo != null && preview != null && surfaceProducer != null && !isPaused) {
@@ -814,6 +882,11 @@ class MobileScanner(
         textRecognitionErrorCallback = null
         textNextRunAt = 0L
 
+        // Release luma sampling state.
+        lumaEnabled = false
+        lumaCallback = null
+        lumaNextRunAt = 0L
+
         // Shutdown the analysis executor
         analysisExecutor.shutdown()
         // Create a new executor for potential restart
@@ -868,6 +941,57 @@ class MobileScanner(
         }.addOnCompleteListener {
             barcodeScanner.close()
         }
+    }
+
+    /**
+     * Analyze a still image for text using the on-device ML Kit
+     * recognizer. Mirrors [analyzeImage] but emits the same payload
+     * shape the live OCR stream uses, so the Dart side can reuse
+     * `TextCapture.fromNative` without branching.
+     *
+     * The recognizer is created on demand for the requested [script]
+     * and closed once the analysis completes — independent from the
+     * long-lived camera-stream recognizer so we don't have to
+     * re-configure that one for one-off gallery images.
+     */
+    fun analyzeImageText(
+        image: Uri,
+        script: String?,
+        onSuccess: (Map<String, Any?>?) -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        val inputImage: InputImage
+        try {
+            inputImage = InputImage.fromFilePath(activity, image)
+        } catch (_: IOException) {
+            onError(MobileScannerErrorCodes.ANALYZE_IMAGE_NO_VALID_IMAGE_ERROR_MESSAGE)
+            return
+        }
+
+        val recognizer = textRecognizerFactory(script)
+        recognizer.process(inputImage)
+            .addOnSuccessListener { result ->
+                try {
+                    val payload = serializeTextResult(
+                        result,
+                        cropRect = null,
+                        displayWidth = inputImage.width,
+                        displayHeight = inputImage.height,
+                    )
+                    onSuccess(payload)
+                } catch (e: Exception) {
+                    onError(e.localizedMessage ?: e.toString())
+                } finally {
+                    recognizer.close()
+                }
+            }
+            .addOnFailureListener { e ->
+                try {
+                    onError(e.localizedMessage ?: e.toString())
+                } finally {
+                    recognizer.close()
+                }
+            }
     }
 
     /**

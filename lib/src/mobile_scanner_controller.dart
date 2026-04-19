@@ -13,11 +13,13 @@ import 'package:mobile_scanner/src/enums/camera_facing.dart';
 import 'package:mobile_scanner/src/enums/camera_lens_type.dart';
 import 'package:mobile_scanner/src/enums/detection_speed.dart';
 import 'package:mobile_scanner/src/enums/mobile_scanner_error_code.dart';
+import 'package:mobile_scanner/src/enums/text_recognition_script.dart';
 import 'package:mobile_scanner/src/enums/torch_state.dart';
 import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.dart';
 import 'package:mobile_scanner/src/mobile_scanner_exception.dart';
 import 'package:mobile_scanner/src/mobile_scanner_platform_interface.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/luma_sampling.dart';
 import 'package:mobile_scanner/src/objects/mobile_scanner_state.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/switch_camera_option.dart';
@@ -41,6 +43,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     this.autoZoom = false,
     this.initialZoom,
     this.textRecognition = TextRecognitionOptions.disabled,
+    this.lumaSampling = LumaSampling.disabled,
   }) : detectionTimeoutMs =
            detectionSpeed == DetectionSpeed.normal ? detectionTimeoutMs : 0,
        assert(
@@ -148,12 +151,26 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// web.
   final TextRecognitionOptions textRecognition;
 
+  /// Configuration for the average-luma signal emitted alongside the
+  /// barcode and text streams.
+  ///
+  /// Defaults to [LumaSampling.disabled]. Set [LumaSampling.enabled] to
+  /// `true` to start receiving values from the [luma] stream.
+  ///
+  /// Currently supported on Android, iOS and macOS.
+  final LumaSampling lumaSampling;
+
   /// The internal barcode controller, that listens for detected barcodes.
   final StreamController<BarcodeCapture> _barcodesController =
       StreamController.broadcast();
 
   /// The internal text controller, that listens for recognized text.
   final StreamController<TextCapture> _recognizedTextController =
+      StreamController.broadcast();
+
+  /// The internal luma controller, that listens for average luma samples
+  /// (normalized to the `[0, 1]` range).
+  final StreamController<double> _lumaController =
       StreamController.broadcast();
 
   /// Get the stream of scanned barcodes.
@@ -172,8 +189,17 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// [MobileScannerTextException] is emitted to the stream.
   Stream<TextCapture> get recognizedText => _recognizedTextController.stream;
 
+  /// Get the stream of average luma samples normalized to the `[0, 1]`
+  /// range.
+  ///
+  /// Only emits when [lumaSampling] was constructed with
+  /// `LumaSampling(enabled: true)`. Otherwise the stream is silent for
+  /// the lifetime of the controller.
+  Stream<double> get luma => _lumaController.stream;
+
   StreamSubscription<BarcodeCapture?>? _barcodesSubscription;
   StreamSubscription<TextCapture?>? _recognizedTextSubscription;
+  StreamSubscription<double>? _lumaSubscription;
   StreamSubscription<TorchState>? _torchStateSubscription;
   StreamSubscription<double>? _zoomScaleSubscription;
   StreamSubscription<DeviceOrientation>? _deviceOrientationSubscription;
@@ -187,12 +213,14 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   void _disposeListeners() {
     unawaited(_barcodesSubscription?.cancel());
     unawaited(_recognizedTextSubscription?.cancel());
+    unawaited(_lumaSubscription?.cancel());
     unawaited(_torchStateSubscription?.cancel());
     unawaited(_zoomScaleSubscription?.cancel());
     unawaited(_deviceOrientationSubscription?.cancel());
 
     _barcodesSubscription = null;
     _recognizedTextSubscription = null;
+    _lumaSubscription = null;
     _torchStateSubscription = null;
     _zoomScaleSubscription = null;
     _deviceOrientationSubscription = null;
@@ -240,6 +268,14 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
             },
             cancelOnError: false,
           );
+    }
+
+    if (lumaSampling.enabled) {
+      _lumaSubscription =
+          MobileScannerPlatform.instance.lumaStream.listen((sample) {
+        if (_lumaController.isClosed) return;
+        _lumaController.add(sample);
+      }, cancelOnError: false);
     }
 
     _torchStateSubscription = MobileScannerPlatform.instance.torchStateStream
@@ -350,6 +386,29 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     List<BarcodeFormat> formats = const <BarcodeFormat>[],
   }) {
     return MobileScannerPlatform.instance.analyzeImage(path, formats: formats);
+  }
+
+  /// Analyze the still image at [path] for text using the on-device
+  /// recognizer (ML Kit on Android, Vision on Apple).
+  ///
+  /// Mirrors [analyzeImage] but for OCR. Returns the recognized text
+  /// (blocks + lines + bounding boxes), or `null` when nothing
+  /// recognizable was found.
+  ///
+  /// [script] biases the recognizer towards a script family. Defaults
+  /// to Latin. On Android, the corresponding ML Kit artifact must be
+  /// on the classpath; if it's missing the recognizer transparently
+  /// falls back to Latin.
+  ///
+  /// Throws [MobileScannerTextException] when the underlying recognizer
+  /// reports an error, and [UnsupportedError] when the platform does
+  /// not support still-image text recognition.
+  Future<TextCapture?> analyzeImageText(
+    String path, {
+    TextRecognitionScript script = TextRecognitionScript.latin,
+  }) {
+    return MobileScannerPlatform.instance
+        .analyzeImageText(path, script: script);
   }
 
   /// Build a camera preview widget.
@@ -515,6 +574,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
       autoZoom: autoZoom,
       initialZoom: initialZoom,
       textRecognition: textRecognition,
+      lumaSampling: lumaSampling,
     );
 
     try {
@@ -807,6 +867,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     _isDisposed = true;
     unawaited(_barcodesController.close());
     unawaited(_recognizedTextController.close());
+    unawaited(_lumaController.close());
     super.dispose();
 
     await MobileScannerPlatform.instance.dispose();

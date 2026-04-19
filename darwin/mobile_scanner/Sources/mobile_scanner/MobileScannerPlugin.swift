@@ -64,6 +64,17 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// `Date().timeIntervalSince1970` units.
     var textNextRunAt: Double = 0.0
 
+    /// Whether to also sample the average luma of every frame. Sampling
+    /// is allocation-free and runs synchronously on the capture queue.
+    var lumaSamplingEnabled: Bool = false
+
+    /// Throttle for luma sampling, independent of the recognizer cadence.
+    var lumaSamplingThrottleSeconds: Double = 0.5
+
+    /// Wall-clock timestamp of the next luma sample, in
+    /// `Date().timeIntervalSince1970` units.
+    var lumaNextRunAt: Double = 0.0
+
 #if os(iOS)
     var interfaceOrientationObserver: NSObjectProtocol?
 #endif
@@ -132,6 +143,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             updateScanWindow(call, result)
         case "analyzeImage":
             analyzeImage(call, result)
+        case "analyzeImageText":
+            analyzeImageText(call, result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -174,6 +187,18 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         registry.textureFrameAvailable(textureId)
         
         let currentTime = Date().timeIntervalSince1970
+
+        // Sample luma synchronously off the capture queue. This runs
+        // every frame regardless of barcode/text throttles so the UI
+        // reacts to lighting changes even when scanning is paused.
+        if lumaSamplingEnabled && currentTime >= lumaNextRunAt {
+            lumaNextRunAt = currentTime + lumaSamplingThrottleSeconds
+            let sample = MobileScannerPlugin.sampleLuma(imageBuffer)
+            DispatchQueue.main.async { [weak self] in
+                self?.sink?(["name": "luma", "data": sample])
+            }
+        }
+
         let eligibleForScan = currentTime > nextScanTime && !imagesCurrentlyBeingProcessed
         if ((detectionSpeed == DetectionSpeed.normal || detectionSpeed == DetectionSpeed.noDuplicates) && eligibleForScan || detectionSpeed == DetectionSpeed.unrestricted) {
             nextScanTime = currentTime + timeoutSeconds
@@ -526,6 +551,17 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             }
             if let script = textConfig["script"] as? String {
                 textRecognitionLanguages = MobileScannerPlugin.languagesForScript(script)
+            }
+        }
+
+        // Configure the optional luma sampler.
+        lumaSamplingEnabled = false
+        lumaSamplingThrottleSeconds = 0.5
+        lumaNextRunAt = 0
+        if let lumaConfig = (call.arguments as? [String: Any])?["lumaSampling"] as? [String: Any] {
+            lumaSamplingEnabled = (lumaConfig["enabled"] as? Bool) ?? false
+            if let throttleMs = lumaConfig["throttleMs"] as? Int {
+                lumaSamplingThrottleSeconds = max(0.0, Double(throttleMs) / 1000.0)
             }
         }
 
@@ -1022,6 +1058,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         textRecognitionLanguages = []
         textRecognitionRespectsScanWindow = true
         textNextRunAt = 0
+
+        lumaSamplingEnabled = false
+        lumaNextRunAt = 0
     }
 
     private func releaseTexture() {
@@ -1122,6 +1161,220 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     message: error.localizedDescription, details: nil))
             }
         }
+    }
+
+    /// Run on-device text recognition over a still image picked from
+    /// the gallery / clipboard. Mirrors [analyzeImage] but emits the
+    /// same payload shape the live `recognizedText` stream uses, so
+    /// the Dart side can reuse `TextCapture.fromNative` without
+    /// branching on the call origin.
+    func analyzeImageText(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+#if os(iOS) && targetEnvironment(simulator)
+        // Same Vision-on-Simulator caveat as the barcode analyzer.
+        result(FlutterError(
+            code: MobileScannerErrorCodes.UNSUPPORTED_OPERATION_ERROR,
+            message: MobileScannerErrorCodes.ANALYZE_IMAGE_IOS_SIMULATOR_NOT_SUPPORTED_ERROR_MESSAGE,
+            details: nil
+        ))
+        return
+#endif
+
+        guard #available(iOS 13.0, macOS 10.15, *) else {
+            result(FlutterError(
+                code: MobileScannerErrorCodes.UNSUPPORTED_OPERATION_ERROR,
+                message: "Text recognition requires iOS 13.0 or macOS 10.15 or newer.",
+                details: nil
+            ))
+            return
+        }
+
+        let argReader = MapArgumentReader(call.arguments as? [String: Any])
+        guard let filePath: String = argReader.string(key: "filePath") else {
+            result(nil)
+            return
+        }
+        let script = argReader.string(key: "script") ?? "latin"
+        let languages = MobileScannerPlugin.languagesForScript(script)
+
+        let fileUrl = URL(fileURLWithPath: filePath)
+        guard let ciImage = CIImage(contentsOf: fileUrl) else {
+            result(FlutterError(
+                code: MobileScannerErrorCodes.TEXT_ERROR,
+                message: MobileScannerErrorCodes.ANALYZE_IMAGE_NO_VALID_IMAGE_ERROR_MESSAGE,
+                details: nil))
+            return
+        }
+
+        // Vision needs a `CGImage` to back the request handler when we
+        // want pixel-level dimensions for coordinate transforms.
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            result(FlutterError(
+                code: MobileScannerErrorCodes.TEXT_ERROR,
+                message: MobileScannerErrorCodes.ANALYZE_IMAGE_NO_VALID_IMAGE_ERROR_MESSAGE,
+                details: nil))
+            return
+        }
+
+        let imageRequestHandler = VNImageRequestHandler(
+            cgImage: cgImage,
+            orientation: CGImagePropertyOrientation.up,
+            options: [:])
+
+        let request = VNRecognizeTextRequest { [weak self] req, err in
+            guard let self = self else { return }
+            if let err = err {
+                DispatchQueue.main.async {
+                    result(FlutterError(
+                        code: MobileScannerErrorCodes.TEXT_ERROR,
+                        message: err.localizedDescription, details: nil))
+                }
+                return
+            }
+            guard let observations = req.results as? [VNRecognizedTextObservation],
+                  !observations.isEmpty else {
+                DispatchQueue.main.async { result(nil) }
+                return
+            }
+            let payload = self.serializeStillImageText(
+                observations: observations, image: cgImage)
+            DispatchQueue.main.async { result(payload) }
+        }
+
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        if !languages.isEmpty {
+            request.recognitionLanguages = languages
+        }
+
+        do {
+            try imageRequestHandler.perform([request])
+        } catch let error {
+            DispatchQueue.main.async {
+                result(FlutterError(
+                    code: MobileScannerErrorCodes.TEXT_ERROR,
+                    message: error.localizedDescription, details: nil))
+            }
+        }
+    }
+
+    /// Serialize text observations from a still image (as opposed to a
+    /// live camera frame). The live variant rotates dimensions to match
+    /// the portrait-locked preview, which we don't want for an arbitrary
+    /// gallery image — those should report their natural width/height.
+    @available(iOS 13.0, macOS 10.15, *)
+    private func serializeStillImageText(
+        observations: [VNRecognizedTextObservation],
+        image: CGImage
+    ) -> [String: Any?] {
+        let displayWidth = Double(image.width)
+        let displayHeight = Double(image.height)
+
+        var blocks: [[String: Any?]] = []
+        var joined = ""
+
+        for observation in observations {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let lineText = candidate.string
+            let bb = observation.boundingBox
+            let left = Double(bb.minX) * displayWidth
+            let right = Double(bb.maxX) * displayWidth
+            let top = (1.0 - Double(bb.maxY)) * displayHeight
+            let bottom = (1.0 - Double(bb.minY)) * displayHeight
+
+            let boundingBox: [String: Any?] = [
+                "left": left, "top": top, "right": right, "bottom": bottom,
+            ]
+            let lineMap: [String: Any?] = [
+                "text": lineText,
+                "confidence": Double(candidate.confidence),
+                "boundingBox": boundingBox,
+            ]
+            blocks.append([
+                "text": lineText,
+                "boundingBox": boundingBox,
+                "lines": [lineMap],
+            ])
+            if !joined.isEmpty { joined += "\n\n" }
+            joined += lineText
+        }
+
+        return [
+            "name": "text",
+            "data": [
+                "text": joined,
+                "blocks": blocks,
+                "width": displayWidth,
+                "height": displayHeight,
+            ],
+        ]
+    }
+
+    /// Sample the average luma of [imageBuffer] on a coarse grid and
+    /// normalize to the `[0, 1]` range. Allocation-free; supports the
+    /// common 4:2:0 planar formats produced by the camera as well as
+    /// the BGRA fallback.
+    static func sampleLuma(_ imageBuffer: CVPixelBuffer) -> Double {
+        CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
+
+        if CVPixelBufferIsPlanar(imageBuffer) {
+            // Plane 0 is the Y (luma) plane for 420YpCbCr formats.
+            guard let base = CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 0)
+            else { return 0.0 }
+            let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 0)
+            let width = CVPixelBufferGetWidthOfPlane(imageBuffer, 0)
+            let height = CVPixelBufferGetHeightOfPlane(imageBuffer, 0)
+            if width == 0 || height == 0 { return 0.0 }
+
+            let stepY = max(height / 16, 1)
+            let stepX = max(width / 16, 1)
+            var sum: Int = 0
+            var count: Int = 0
+            let buf = base.assumingMemoryBound(to: UInt8.self)
+            var y = 0
+            while y < height {
+                var x = 0
+                let row = y * bytesPerRow
+                while x < width {
+                    sum += Int(buf[row + x])
+                    count += 1
+                    x += stepX
+                }
+                y += stepY
+            }
+            return count == 0 ? 0.0 : (Double(sum) / Double(count)) / 255.0
+        }
+
+        // BGRA fallback: approximate luma per ITU-R BT.601.
+        guard let base = CVPixelBufferGetBaseAddress(imageBuffer)
+        else { return 0.0 }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer)
+        let width = CVPixelBufferGetWidth(imageBuffer)
+        let height = CVPixelBufferGetHeight(imageBuffer)
+        if width == 0 || height == 0 { return 0.0 }
+
+        let stepY = max(height / 16, 1)
+        let stepX = max(width / 16, 1)
+        var sum: Double = 0
+        var count: Int = 0
+        let buf = base.assumingMemoryBound(to: UInt8.self)
+        var y = 0
+        while y < height {
+            var x = 0
+            let row = y * bytesPerRow
+            while x < width {
+                let i = row + x * 4
+                let b = Double(buf[i])
+                let g = Double(buf[i + 1])
+                let r = Double(buf[i + 2])
+                sum += 0.299 * r + 0.587 * g + 0.114 * b
+                count += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        return count == 0 ? 0.0 : (sum / Double(count)) / 255.0
     }
 
     /// Map a Dart `TextRecognitionScript.rawValue` to a list of BCP-47

@@ -25,6 +25,7 @@ export 'src/objects/contact_info.dart';
 export 'src/objects/driver_license.dart';
 export 'src/objects/email.dart';
 export 'src/objects/geo_point.dart';
+export 'src/objects/luma_sampling.dart';
 export 'src/objects/mobile_scanner_state.dart';
 export 'src/objects/person_name.dart';
 export 'src/objects/phone.dart';

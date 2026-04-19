@@ -3,12 +3,16 @@
 **Highlights**
 
 * Added on-device text recognition that runs alongside barcode scanning on a single camera stream. Pass `TextRecognitionOptions(enabled: true)` to `MobileScannerController` and listen on `controller.recognizedText` for `TextCapture` events. Supported on Android (ML Kit), iOS (Apple Vision, iOS 13+) and macOS (Apple Vision, 10.15+); a no-op on the web.
+* Added `MobileScannerController.analyzeImageText(path, {script})` for still-image OCR (gallery, paste, share-sheet) that mirrors the existing `analyzeImage` API. Returns the same `TextCapture` shape the live stream produces, so consumers can share the post-processing path.
+* Added an opt-in average-luma signal exposed on `MobileScannerController.luma`. Enable with `LumaSampling(enabled: true)` to drive low-light affordances (e.g. "tap the torch" nudges) without spinning up a second analyzer pipeline. Values are normalized to `[0, 1]` and throttled independently of barcode/text detection.
 
 **Improvements**
 
 * [Android] Frame ref-counting in `captureOutput` so the `ImageProxy` is only closed after both barcode and (optional) text recognition complete.
 * [Android] New ML Kit dependency `com.google.mlkit:text-recognition:16.0.1` (or `play-services-mlkit-text-recognition:19.0.1` when the unbundled flavour is selected). Other scripts (Chinese, Devanagari, Japanese, Korean) are picked up via reflection if their artifacts are present on the classpath; otherwise the recognizer falls back to Latin with a single warn log.
+* [Android] Luma sampling reads the Y plane on a coarse 16×16 grid (allocation-free) so it can run on every analyzer tick without GC pressure.
 * [Apple] Text recognizer reuses the same `VNImageRequestHandler` as the barcode request, with no extra image decoding cost. Honours `scanWindow` via `regionOfInterest`.
+* [Apple] Luma sampling supports both planar 4:2:0 (uses the Y plane) and BGRA (BT.601 approximation) capture formats.
 
 ## 7.2.1
 

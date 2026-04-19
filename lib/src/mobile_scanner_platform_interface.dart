@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:mobile_scanner/src/enums/barcode_format.dart';
 import 'package:mobile_scanner/src/enums/camera_lens_type.dart';
+import 'package:mobile_scanner/src/enums/text_recognition_script.dart';
 import 'package:mobile_scanner/src/enums/torch_state.dart';
 import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.dart';
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
@@ -45,6 +46,17 @@ abstract class MobileScannerPlatform extends PlatformInterface {
     throw UnimplementedError('recognizedTextStream has not been implemented.');
   }
 
+  /// Get the stream of average luma samples emitted alongside the
+  /// barcode and text streams.
+  ///
+  /// Values are normalized to the `[0, 1]` range, where `0` is solid
+  /// black and `1` is solid white. Empty when luma sampling has not
+  /// been enabled via [StartOptions.lumaSampling] or when the platform
+  /// does not support it (currently the web).
+  Stream<double> get lumaStream {
+    throw UnimplementedError('lumaStream has not been implemented.');
+  }
+
   /// Get the stream of torch state changes.
   Stream<TorchState> get torchStateStream {
     throw UnimplementedError('torchStateStream has not been implemented.');
@@ -68,6 +80,26 @@ abstract class MobileScannerPlatform extends PlatformInterface {
     List<BarcodeFormat> formats = const <BarcodeFormat>[],
   }) {
     throw UnimplementedError('analyzeImage() has not been implemented.');
+  }
+
+  /// Run on-device text recognition over the still image at [path].
+  ///
+  /// Returns the recognized text (blocks + lines + bounding boxes), or
+  /// `null` when nothing recognizable was found. Throws a
+  /// `MobileScannerTextException` when the underlying recognizer reports
+  /// an error.
+  ///
+  /// [script] hints which language family the recognizer should bias
+  /// towards. On Android this picks the corresponding ML Kit text
+  /// recognition artifact (Latin / Chinese / Devanagari / Japanese /
+  /// Korean), with a graceful fallback to Latin when the artifact is
+  /// not on the classpath. On Apple platforms the script is mapped to a
+  /// list of BCP-47 hints passed to `VNRecognizeTextRequest`.
+  Future<TextCapture?> analyzeImageText(
+    String path, {
+    TextRecognitionScript script = TextRecognitionScript.latin,
+  }) {
+    throw UnimplementedError('analyzeImageText() has not been implemented.');
   }
 
   /// Build the camera view for the barcode scanner.
