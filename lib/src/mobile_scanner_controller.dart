@@ -26,6 +26,12 @@ import 'package:mobile_scanner/src/objects/switch_camera_option.dart';
 import 'package:mobile_scanner/src/objects/text_capture.dart';
 import 'package:mobile_scanner/src/objects/text_recognition_options.dart';
 
+/// Sentinel value used to distinguish a caller-omitted `attachTimeout`
+/// (use [MobileScannerController.defaultAttachTimeout]) from an
+/// explicit `null` (wait forever) on
+/// [MobileScannerController.start]. Compared via [identical].
+const Symbol _kUseDefaultAttachTimeout = #mobileScanner_defaultAttachTimeout;
+
 /// The controller for the [MobileScanner] widget.
 class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// Construct a new [MobileScannerController] instance.
@@ -209,6 +215,27 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   // that is attached to this controller,
   // called its `initState()` lifecycle method.
   final Completer<void> _isAttachedCompleter = Completer<void>();
+
+  /// Resolves once the [MobileScanner] widget bound to this controller
+  /// has finished mounting (its `initState()` has run and called the
+  /// internal `attach()` hook).
+  ///
+  /// Useful when callers need to interleave widget mounting and
+  /// camera startup deterministically — for example, when the camera
+  /// preview is gated behind an async permission prompt and the
+  /// caller wants to `await` mount before issuing the first
+  /// [start] / [setFocusPoint] / [setZoomScale] call.
+  ///
+  /// If the widget is already mounted by the time this is read, the
+  /// returned future is already complete. The future never errors;
+  /// it simply waits.
+  Future<void> get whenAttached => _isAttachedCompleter.future;
+
+  /// Whether the [MobileScanner] widget bound to this controller has
+  /// already mounted. Equivalent to inspecting [whenAttached] without
+  /// awaiting it; intended for callers that need a synchronous check
+  /// (e.g. asserts in tests).
+  bool get isAttached => _isAttachedCompleter.isCompleted;
 
   void _disposeListeners() {
     unawaited(_barcodesSubscription?.cancel());
@@ -476,6 +503,13 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     await MobileScannerPlatform.instance.setFocusPoint(clampedPosition);
   }
 
+  /// Default timeout for the attach-handshake when [start] is called
+  /// without an explicit `attachTimeout` argument. Sized to be long
+  /// enough for the next frame to mount the widget tree, but short
+  /// enough that "you forgot to put `MobileScanner` in your tree" is
+  /// surfaced to the developer instead of hanging forever.
+  static const Duration defaultAttachTimeout = Duration(milliseconds: 500);
+
   /// Start scanning for barcodes.
   ///
   /// The [cameraDirection] can be used to specify the camera direction.
@@ -483,6 +517,20 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   ///
   /// The [cameraLensType] can be used to specify the camera lens type.
   /// If this is null, this defaults to the [lensType] value.
+  ///
+  /// The [attachTimeout] controls how long [start] waits for the bound
+  /// [MobileScanner] widget to finish mounting (i.e. for [whenAttached]
+  /// to resolve) before throwing
+  /// [MobileScannerErrorCode.controllerNotAttached]:
+  ///
+  ///  * `null` — wait forever. Use this when you intentionally call
+  ///    [start] before the widget is in the tree (e.g. inside an
+  ///    async permission flow that mounts the widget afterwards).
+  ///    Combine with [whenAttached] for explicit ordering.
+  ///  * A [Duration] — wait at most that long. Useful as a safety
+  ///    net to catch programmer errors.
+  ///  * Omitted — uses [defaultAttachTimeout] (500ms), preserving
+  ///    the historical behaviour for existing callers.
   ///
   /// Does nothing if the camera is already running.
   /// Upon calling this method, the necessary camera permission will be
@@ -493,6 +541,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   Future<void> start({
     CameraFacing? cameraDirection,
     CameraLensType? cameraLensType,
+    Object? attachTimeout = _kUseDefaultAttachTimeout,
   }) async {
     if (_isDisposed) {
       throw MobileScannerException(
@@ -503,24 +552,46 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
       );
     }
 
-    // If start was called before the MobileScanner widget
-    // had a chance to call its initState method,
-    // wait for it to be called, using a timeout.
+    // If start was called before the MobileScanner widget had a chance
+    // to call its initState method, wait for it to be called.
+    //
+    // Three modes here, gated by `attachTimeout`:
+    //   * Sentinel `_kUseDefaultAttachTimeout` (the default value) →
+    //     fall back to [defaultAttachTimeout]. Backwards compatible
+    //     with the historical 500ms behaviour.
+    //   * Explicit `null` → wait forever. Lets callers interleave an
+    //     async permission flow with widget mounting.
+    //   * Explicit [Duration] → wait at most that long, then surface
+    //     [MobileScannerErrorCode.controllerNotAttached].
     if (!_isAttachedCompleter.isCompleted) {
-      // The timeout is currently an arbitrary value,
-      // which should be long enough for the next frame
-      // to propagate any pending changes to the widget tree.
-      await _isAttachedCompleter.future
-          .timeout(const Duration(milliseconds: 500))
-          .catchError((Object error, StackTrace stackTrace) {
-            throw MobileScannerException(
-              errorCode: MobileScannerErrorCode.controllerNotAttached,
-              errorDetails: MobileScannerErrorDetails(
-                message: MobileScannerErrorCode.controllerNotAttached.message,
-                details: stackTrace.toString(),
-              ),
-            );
-          });
+      final Duration? effectiveTimeout;
+      if (identical(attachTimeout, _kUseDefaultAttachTimeout)) {
+        effectiveTimeout = defaultAttachTimeout;
+      } else if (attachTimeout == null) {
+        effectiveTimeout = null;
+      } else if (attachTimeout is Duration) {
+        effectiveTimeout = attachTimeout;
+      } else {
+        throw ArgumentError.value(
+          attachTimeout,
+          'attachTimeout',
+          'Must be null or a Duration.',
+        );
+      }
+
+      var attachFuture = _isAttachedCompleter.future;
+      if (effectiveTimeout != null) {
+        attachFuture = attachFuture.timeout(effectiveTimeout);
+      }
+      await attachFuture.catchError((Object error, StackTrace stackTrace) {
+        throw MobileScannerException(
+          errorCode: MobileScannerErrorCode.controllerNotAttached,
+          errorDetails: MobileScannerErrorDetails(
+            message: MobileScannerErrorCode.controllerNotAttached.message,
+            details: stackTrace.toString(),
+          ),
+        );
+      });
 
       // Abort if the controller was disposed
       // while waiting for the widget to be attached.

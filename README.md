@@ -354,6 +354,39 @@ approximation) per tick and is independent of the barcode/text
 throttles, so the signal continues even while detection is paused.
 A no-op on the web.
 
+### Manual `start()` ordering (`whenAttached` / `attachTimeout`)
+
+`MobileScannerController.start()` needs the bound `MobileScanner`
+widget to have finished mounting before it can wire up the camera
+surface. By default, `start()` waits up to 500ms
+(`MobileScannerController.defaultAttachTimeout`) for that to happen
+and then throws `controllerNotAttached` — a safety net for the
+common "you forgot to put `MobileScanner` in your tree" mistake.
+
+Two new hooks let you opt out of the timeout when you really do
+want to call `start()` first (e.g. inside an async permission flow
+that mounts the widget on the next frame):
+
+```dart
+final controller = MobileScannerController(autoStart: false);
+
+// Render the MobileScanner widget unconditionally now…
+setState(() => _scanner = controller);
+
+// …and either await mount explicitly:
+await controller.whenAttached;
+await controller.start();
+
+// …or let start() wait forever for the widget to arrive:
+await controller.start(attachTimeout: null);
+```
+
+`whenAttached` resolves once the widget's `initState` has run.
+`isAttached` is the synchronous form for asserts. `attachTimeout`
+on `start()` accepts `null` (wait forever), a `Duration`, or — when
+omitted — falls back to `defaultAttachTimeout` for backwards
+compatibility.
+
 ## Known Limitations
 
 ### `rawBytes` on iOS and macOS

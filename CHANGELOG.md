@@ -5,6 +5,8 @@
 * Added on-device text recognition that runs alongside barcode scanning on a single camera stream. Pass `TextRecognitionOptions(enabled: true)` to `MobileScannerController` and listen on `controller.recognizedText` for `TextCapture` events. Supported on Android (ML Kit), iOS (Apple Vision, iOS 13+) and macOS (Apple Vision, 10.15+); a no-op on the web.
 * Added `MobileScannerController.analyzeImageText(path, {script})` for still-image OCR (gallery, paste, share-sheet) that mirrors the existing `analyzeImage` API. Returns the same `TextCapture` shape the live stream produces, so consumers can share the post-processing path.
 * Added an opt-in average-luma signal exposed on `MobileScannerController.luma`. Enable with `LumaSampling(enabled: true)` to drive low-light affordances (e.g. "tap the torch" nudges) without spinning up a second analyzer pipeline. Values are normalized to `[0, 1]` and throttled independently of barcode/text detection.
+* Added `MobileScannerController.whenAttached` (a `Future<void>`) and `isAttached` (a synchronous `bool`) so callers can deterministically interleave widget mounting with camera startup — useful when `start()` is called inside an async permission flow that mounts the `MobileScanner` widget afterwards. The completer was already there internally; this just makes it part of the public API.
+* Added an optional `attachTimeout` argument to `MobileScannerController.start()`. Pass an explicit `Duration` to override the historical 500ms attach-handshake budget, or `null` to wait forever (typical when pairing with `whenAttached`). Omitting the argument preserves the previous behaviour via the new `MobileScannerController.defaultAttachTimeout` constant.
 
 **Improvements**
 
