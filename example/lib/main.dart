@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:mobile_scanner_example/screens/mobile_scanner_advanced.dart';
+import 'package:mobile_scanner_example/screens/mobile_scanner_text.dart';
 
 void main() {
   runApp(
@@ -170,6 +171,14 @@ class _ExampleHome extends StatelessWidget {
                     'controller, and multiple control widgets.',
                 const MobileScannerAdvanced(),
                 Icons.settings_remote,
+              ),
+              _buildItem(
+                context,
+                'Barcode + Text Recognition',
+                'Runs barcode scanning and on-device OCR on a single camera '
+                    'stream.',
+                const MobileScannerText(),
+                Icons.text_fields,
               ),
               // TODO(juliansteenbakker): Fix picklist example
               // _buildItem(

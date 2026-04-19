@@ -60,3 +60,23 @@ class MobileScannerBarcodeException implements Exception {
         'input image.)';
   }
 }
+
+/// This class represents an exception thrown by the [MobileScannerController]
+/// when a text recognition error occurs while processing an input frame.
+class MobileScannerTextException implements Exception {
+  /// Creates a new [MobileScannerTextException] with the given error message.
+  const MobileScannerTextException(this.message);
+
+  /// The error message of the exception.
+  final String? message;
+
+  @override
+  String toString() {
+    if (message?.isNotEmpty ?? false) {
+      return 'MobileScannerTextException($message)';
+    }
+
+    return 'MobileScannerTextException(Could not recognize text in the '
+        'input image.)';
+  }
+}

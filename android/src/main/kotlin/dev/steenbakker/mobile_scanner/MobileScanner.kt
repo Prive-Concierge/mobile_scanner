@@ -36,6 +36,8 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognizer
 import dev.steenbakker.mobile_scanner.objects.DetectionSpeed
 import dev.steenbakker.mobile_scanner.objects.MobileScannerErrorCodes
 import dev.steenbakker.mobile_scanner.objects.MobileScannerStartParameters
@@ -49,6 +51,7 @@ import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
 
 class MobileScanner(
@@ -58,7 +61,13 @@ class MobileScanner(
     private val mobileScannerErrorCallback: MobileScannerErrorCallback,
     private val deviceOrientationListener: DeviceOrientationListener,
     private val barcodeScannerFactory: (options: BarcodeScannerOptions?) -> BarcodeScanner = ::defaultBarcodeScannerFactory,
+    private val textRecognizerFactory: (script: String?) -> TextRecognizer = TextRecognizerFactory::create,
 ) {
+
+    /// Optional text recognition callbacks. Wired up via [start] when text
+    /// recognition is enabled.
+    private var textRecognitionCallback: TextRecognitionCallback? = null
+    private var textRecognitionErrorCallback: TextRecognitionErrorCallback? = null
 
     init {
         configureCameraProcessProvider()
@@ -71,6 +80,7 @@ class MobileScanner(
     private var preview: Preview? = null
     private var surfaceProducer: TextureRegistry.SurfaceProducer? = null
     private var scanner: BarcodeScanner? = null
+    private var textRecognizer: TextRecognizer? = null
     private var lastScanned: List<String?>? = null
     private var scannerTimeout = false
     private var imageAnalysis: ImageAnalysis? = null
@@ -83,6 +93,12 @@ class MobileScanner(
     private var detectionTimeout: Long = 250
     private var returnImage = false
     private var isPaused = false
+
+    /// Text recognition runtime state
+    private var textRecognitionEnabled: Boolean = false
+    private var textRecognitionRespectScanWindow: Boolean = true
+    private var textRecognitionThrottleMs: Long = 400
+    @Volatile private var textNextRunAt: Long = 0L
 
     companion object {
         // Configure the `ProcessCameraProvider` to only log errors.
@@ -109,6 +125,11 @@ class MobileScanner(
 
     /**
      * callback for the camera. Every frame is passed through this function.
+     *
+     * The frame is fanned out to (a) the barcode scanner (always) and
+     * (b) the text recognizer (when enabled and the per-recognizer throttle
+     * has elapsed). [imageProxy.close] is reference counted so the frame is
+     * only released once both consumers have completed.
      */
     @ExperimentalGetImage
     val captureOutput = ImageAnalysis.Analyzer { imageProxy ->
@@ -133,6 +154,28 @@ class MobileScanner(
             InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
         }
 
+        // Decide whether to also dispatch a text recognition pass on this
+        // frame. Throttling is independent of barcode detection so the OCR
+        // pass does not delay barcode recognition.
+        val now = System.currentTimeMillis()
+        val activeTextRecognizer = textRecognizer
+        val shouldRunText = textRecognitionEnabled
+            && activeTextRecognizer != null
+            && now >= textNextRunAt
+        if (shouldRunText) {
+            textNextRunAt = now + textRecognitionThrottleMs
+        }
+
+        // Reference count for releasing the imageProxy. 1 for the barcode
+        // pass plus 1 if we are also running text recognition on this frame.
+        val pending = AtomicInteger(if (shouldRunText) 2 else 1)
+        val releaseFrame = {
+            if (pending.decrementAndGet() == 0) {
+                invertedBitmap?.recycle()
+                imageProxy.close()
+            }
+        }
+
         scanner?.let {
             it.process(inputImage).addOnSuccessListener { barcodes ->
                 if (detectionSpeed == DetectionSpeed.NO_DUPLICATES) {
@@ -142,7 +185,7 @@ class MobileScanner(
 
                     if (newScannedBarcodes == lastScanned) {
                         // New scanned is duplicate, returning
-                        imageProxy.close()
+                        releaseFrame()
                         return@addOnSuccessListener
                     }
                     if (newScannedBarcodes.isNotEmpty()) {
@@ -164,7 +207,7 @@ class MobileScanner(
                 }
 
                 if (barcodeMap.isEmpty()) {
-                    imageProxy.close()
+                    releaseFrame()
                     return@addOnSuccessListener
                 }
 
@@ -176,9 +219,7 @@ class MobileScanner(
                         null,
                         if (portrait) inputImage.width else inputImage.height,
                         if (portrait) inputImage.height else inputImage.width)
-                    // Clean up the inverted bitmap if we created one
-                    invertedBitmap?.recycle()
-                    imageProxy.close()
+                    releaseFrame()
                     return@addOnSuccessListener
                 }
 
@@ -218,15 +259,23 @@ class MobileScanner(
                         bmHeight
                     )
 
-                    // Clean up resources
                     rotatedBitmap.recycle()
-                    imageProxy.close()
+                    releaseFrame()
                 }
             }.addOnFailureListener { e ->
                 mobileScannerErrorCallback(
                     e.localizedMessage ?: e.toString()
                 )
+                releaseFrame()
             }
+        } ?: run {
+            // No barcode scanner active (extremely unlikely while running),
+            // make sure we still release our share of the ref count.
+            releaseFrame()
+        }
+
+        if (shouldRunText) {
+            runTextRecognition(inputImage, imageProxy, releaseFrame)
         }
 
         if (detectionSpeed == DetectionSpeed.NORMAL) {
@@ -235,6 +284,145 @@ class MobileScanner(
                 scannerTimeout = false
             }, detectionTimeout)
         }
+    }
+
+    /**
+     * Run a single text recognition pass on [inputImage]. The image is the
+     * same instance already submitted to the barcode scanner; the underlying
+     * frame is released by [releaseFrame] once **both** ML Kit calls
+     * complete (barcode + text), regardless of order.
+     */
+    private fun runTextRecognition(
+        inputImage: InputImage,
+        imageProxy: ImageProxy,
+        releaseFrame: () -> Unit,
+    ) {
+        val recognizer = textRecognizer ?: run {
+            releaseFrame()
+            return
+        }
+
+        val portrait = (camera?.cameraInfo?.sensorRotationDegrees ?: 0) % 180 == 0
+        val displayWidth = if (portrait) inputImage.width else inputImage.height
+        val displayHeight = if (portrait) inputImage.height else inputImage.width
+
+        // Pre-compute the scan window in input-image coordinates if cropping
+        // was requested. Doing it once here avoids repeated maths inside the
+        // per-block loop below.
+        val cropRect: Rect? = if (textRecognitionRespectScanWindow) {
+            scanWindow?.let { window ->
+                try {
+                    val rotation = imageProxy.imageInfo.rotationDegrees
+                    val imgW = if (rotation % 180 == 0) imageProxy.width else imageProxy.height
+                    val imgH = if (rotation % 180 == 0) imageProxy.height else imageProxy.width
+                    Rect(
+                        (window[0] * imgW).roundToInt(),
+                        (window[1] * imgH).roundToInt(),
+                        (window[2] * imgW).roundToInt(),
+                        (window[3] * imgH).roundToInt(),
+                    )
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            }
+        } else {
+            null
+        }
+
+        recognizer.process(inputImage)
+            .addOnSuccessListener { result ->
+                try {
+                    val event = serializeTextResult(result, cropRect, displayWidth, displayHeight)
+                    if (event != null) {
+                        textRecognitionCallback?.invoke(event)
+                    }
+                } finally {
+                    releaseFrame()
+                }
+            }
+            .addOnFailureListener { e ->
+                textRecognitionErrorCallback?.invoke(e.localizedMessage ?: e.toString())
+                releaseFrame()
+            }
+    }
+
+    /**
+     * Convert an ML Kit [Text] result to the wire format consumed by the
+     * Dart side. Returns `null` if every block was filtered out by the scan
+     * window (in which case we skip emitting an event entirely so consumers
+     * don't see empty pulses).
+     */
+    private fun serializeTextResult(
+        result: Text,
+        cropRect: Rect?,
+        displayWidth: Int,
+        displayHeight: Int,
+    ): Map<String, Any?>? {
+        val blocks = mutableListOf<Map<String, Any?>>()
+        val joinedBlockTexts = StringBuilder()
+
+        for (block in result.textBlocks) {
+            val blockBox = block.boundingBox
+            if (cropRect != null && blockBox != null && !cropRect.intersects(
+                    blockBox.left, blockBox.top, blockBox.right, blockBox.bottom
+                )) {
+                continue
+            }
+
+            val lineMaps = mutableListOf<Map<String, Any?>>()
+            for (line in block.lines) {
+                val lineBox = line.boundingBox
+                if (cropRect != null && lineBox != null && !cropRect.intersects(
+                        lineBox.left, lineBox.top, lineBox.right, lineBox.bottom
+                    )) {
+                    continue
+                }
+                lineMaps.add(
+                    mapOf(
+                        "text" to line.text,
+                        "confidence" to null, // ML Kit does not surface this on Android.
+                        "boundingBox" to lineBox?.let {
+                            mapOf(
+                                "left" to it.left.toDouble(),
+                                "top" to it.top.toDouble(),
+                                "right" to it.right.toDouble(),
+                                "bottom" to it.bottom.toDouble(),
+                            )
+                        },
+                    )
+                )
+            }
+            if (lineMaps.isEmpty()) continue
+
+            blocks.add(
+                mapOf(
+                    "text" to block.text,
+                    "boundingBox" to blockBox?.let {
+                        mapOf(
+                            "left" to it.left.toDouble(),
+                            "top" to it.top.toDouble(),
+                            "right" to it.right.toDouble(),
+                            "bottom" to it.bottom.toDouble(),
+                        )
+                    },
+                    "lines" to lineMaps,
+                )
+            )
+            if (joinedBlockTexts.isNotEmpty()) joinedBlockTexts.append("\n\n")
+            joinedBlockTexts.append(block.text)
+        }
+
+        if (blocks.isEmpty()) return null
+
+        return mapOf(
+            "name" to "text",
+            "data" to mapOf(
+                "text" to joinedBlockTexts.toString(),
+                "blocks" to blocks,
+                "width" to displayWidth.toDouble(),
+                "height" to displayHeight.toDouble(),
+            ),
+        )
     }
 
     /**
@@ -342,6 +530,13 @@ class MobileScanner(
 
     /**
      * Start barcode scanning by initializing the camera and barcode scanner.
+     *
+     * Optionally also starts an on-device text recognizer that consumes the
+     * same camera frames as the barcode scanner. See
+     * [textRecognitionScript], [textRecognitionThrottleMillis] and
+     * [textRecognitionRespectsScanWindow] for the configuration knobs.
+     * When [textCallback] is `null` text recognition stays disabled even if
+     * the corresponding parameters are passed in.
      */
     @ExperimentalLensFacing
     @ExperimentalGetImage
@@ -359,11 +554,28 @@ class MobileScanner(
         cameraResolutionWanted: Size?,
         invertImage: Boolean,
         initialZoom: Double?,
+        textCallback: TextRecognitionCallback? = null,
+        textErrorCallback: TextRecognitionErrorCallback? = null,
+        textRecognitionScript: String? = null,
+        textRecognitionThrottleMillis: Long = 400L,
+        textRecognitionRespectsScanWindow: Boolean = true,
     ) {
         this.detectionSpeed = detectionSpeed
         this.detectionTimeout = detectionTimeout
         this.returnImage = returnImage
         this.invertImage = invertImage
+
+        // Wire up text recognition. We instantiate the recognizer up front so
+        // that the first frame after start() can immediately produce a result.
+        this.textRecognitionEnabled = textCallback != null
+        this.textRecognitionRespectScanWindow = textRecognitionRespectsScanWindow
+        this.textRecognitionThrottleMs = textRecognitionThrottleMillis.coerceAtLeast(0L)
+        this.textRecognitionCallback = textCallback
+        this.textRecognitionErrorCallback = textErrorCallback
+        this.textNextRunAt = 0L
+        if (textRecognitionEnabled) {
+            this.textRecognizer = textRecognizerFactory(textRecognitionScript)
+        }
 
         
         if (camera?.cameraInfo != null && preview != null && surfaceProducer != null && !isPaused) {
@@ -593,6 +805,14 @@ class MobileScanner(
         scanner?.close()
         scanner = null
         lastScanned = null
+
+        // Release the text recognizer.
+        textRecognizer?.close()
+        textRecognizer = null
+        textRecognitionEnabled = false
+        textRecognitionCallback = null
+        textRecognitionErrorCallback = null
+        textNextRunAt = 0L
 
         // Shutdown the analysis executor
         analysisExecutor.shutdown()

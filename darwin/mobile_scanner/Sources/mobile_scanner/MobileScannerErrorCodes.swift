@@ -31,4 +31,7 @@ struct MobileScannerErrorCodes {
     static let SET_SCALE_WHEN_STOPPED_ERROR = "MOBILE_SCANNER_SET_SCALE_WHEN_STOPPED_ERROR"
     static let SET_SCALE_WHEN_STOPPED_ERROR_MESSAGE = "The zoom scale cannot be changed when the camera is stopped."
     static let UNSUPPORTED_OPERATION_ERROR = "MOBILE_SCANNER_UNSUPPORTED_OPERATION"
+    // The error code 'TEXT_ERROR' does not have an error message,
+    // because it uses the error message from the underlying error.
+    static let TEXT_ERROR = "MOBILE_SCANNER_TEXT_ERROR"
 }

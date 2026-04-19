@@ -47,6 +47,23 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     
     var standardZoomFactor: CGFloat = 1
 
+    /// Whether to also run Apple Vision text recognition on every frame.
+    var textRecognitionEnabled: Bool = false
+
+    /// Recognition language hints (BCP-47) supplied to `VNRecognizeTextRequest.recognitionLanguages`.
+    /// Empty defaults to Latin/English on the underlying OS.
+    var textRecognitionLanguages: [String] = []
+
+    /// Whether the recognizer should clamp to `scanWindow` when one is set.
+    var textRecognitionRespectsScanWindow: Bool = true
+
+    /// Throttle for the text recognizer, independent of the barcode scanner.
+    var textRecognitionThrottleSeconds: Double = 0.4
+
+    /// Wall-clock timestamp of the next text recognition pass, in
+    /// `Date().timeIntervalSince1970` units.
+    var textNextRunAt: Double = 0.0
+
 #if os(iOS)
     var interfaceOrientationObserver: NSObjectProtocol?
 #endif
@@ -258,7 +275,17 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         barcodeRequest.regionOfInterest = scanWindow
                     }
 
-                    try imageRequestHandler.perform([barcodeRequest])
+                    // Optionally also recognize text on this frame.
+                    var requests: [VNRequest] = [barcodeRequest]
+                    if self.textRecognitionEnabled && currentTime >= self.textNextRunAt {
+                        self.textNextRunAt = currentTime + self.textRecognitionThrottleSeconds
+                        if #available(iOS 13.0, macOS 10.15, *),
+                           let textRequest = self.makeTextRecognitionRequest(image: currentImage) {
+                            requests.append(textRequest)
+                        }
+                    }
+
+                    try imageRequestHandler.perform(requests)
                 } catch let error {
                     imagesCurrentlyBeingProcessed = false
                     
@@ -270,6 +297,112 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 }
             }
         }
+    }
+
+    /// Build a `VNRecognizeTextRequest` configured with the active scan
+    /// window, languages and throttle. Returns `nil` if text recognition is
+    /// not available on this OS version.
+    @available(iOS 13.0, macOS 10.15, *)
+    private func makeTextRecognitionRequest(image: CGImage) -> VNRecognizeTextRequest? {
+        let request = VNRecognizeTextRequest { [weak self] request, error in
+            guard let self = self else { return }
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.sink?(FlutterError(
+                        code: MobileScannerErrorCodes.TEXT_ERROR,
+                        message: error.localizedDescription, details: nil))
+                }
+                return
+            }
+
+            guard let observations = request.results as? [VNRecognizedTextObservation], !observations.isEmpty else {
+                return
+            }
+
+            let payload = self.serializeText(observations: observations, image: image)
+            DispatchQueue.main.async {
+                self.sink?(payload)
+            }
+        }
+
+        // Accuracy over speed: the recognizer only runs at most every
+        // `textRecognitionThrottleSeconds`, so the extra cycles are worth it.
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        if !textRecognitionLanguages.isEmpty {
+            request.recognitionLanguages = textRecognitionLanguages
+        }
+        if textRecognitionRespectsScanWindow, let window = scanWindow {
+            request.regionOfInterest = window
+        }
+
+        return request
+    }
+
+    /// Convert an array of `VNRecognizedTextObservation` into the wire
+    /// format consumed by the Dart side. One observation maps to one
+    /// "block" + "line" since Apple Vision doesn't surface a paragraph
+    /// grouping.
+    @available(iOS 13.0, macOS 10.15, *)
+    private func serializeText(
+        observations: [VNRecognizedTextObservation],
+        image: CGImage
+    ) -> [String: Any?] {
+#if os(iOS)
+        // The frame is delivered to Flutter in portrait orientation, see
+        // the matching swap in the barcode payload above.
+        let displayWidth = Double(min(image.width, image.height))
+        let displayHeight = Double(max(image.width, image.height))
+#else
+        let displayWidth = Double(image.width)
+        let displayHeight = Double(image.height)
+#endif
+
+        var blocks: [[String: Any?]] = []
+        var joined = ""
+
+        for observation in observations {
+            guard let candidate = observation.topCandidates(1).first else { continue }
+            let lineText = candidate.string
+            // Vision reports normalized coordinates with origin in the
+            // bottom-left. Convert to image-pixel coordinates with origin
+            // in the top-left to match the BarcodePainter convention.
+            let bb = observation.boundingBox
+            let left = Double(bb.minX) * displayWidth
+            let right = Double(bb.maxX) * displayWidth
+            let top = (1.0 - Double(bb.maxY)) * displayHeight
+            let bottom = (1.0 - Double(bb.minY)) * displayHeight
+
+            let boundingBox: [String: Any?] = [
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+            ]
+
+            let lineMap: [String: Any?] = [
+                "text": lineText,
+                "confidence": Double(candidate.confidence),
+                "boundingBox": boundingBox,
+            ]
+            blocks.append([
+                "text": lineText,
+                "boundingBox": boundingBox,
+                "lines": [lineMap],
+            ])
+            if !joined.isEmpty { joined += "\n\n" }
+            joined += lineText
+        }
+
+        return [
+            "name": "text",
+            "data": [
+                "text": joined,
+                "blocks": blocks,
+                "width": displayWidth,
+                "height": displayHeight,
+            ],
+        ]
     }
     
     func checkPermission(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
@@ -378,6 +511,23 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         timeoutSeconds = Double(timeoutMs) / 1000.0
         detectionSpeed = DetectionSpeed(rawValue: speed)!
+
+        // Configure the optional text recognizer.
+        textRecognitionEnabled = false
+        textRecognitionLanguages = []
+        textRecognitionRespectsScanWindow = true
+        textRecognitionThrottleSeconds = 0.4
+        textNextRunAt = 0
+        if let textConfig = (call.arguments as? [String: Any])?["textRecognition"] as? [String: Any] {
+            textRecognitionEnabled = (textConfig["enabled"] as? Bool) ?? false
+            textRecognitionRespectsScanWindow = (textConfig["respectScanWindow"] as? Bool) ?? true
+            if let throttleMs = textConfig["throttleMs"] as? Int {
+                textRecognitionThrottleSeconds = max(0.0, Double(throttleMs) / 1000.0)
+            }
+            if let script = textConfig["script"] as? String {
+                textRecognitionLanguages = MobileScannerPlugin.languagesForScript(script)
+            }
+        }
 
         // Set the camera to use. In macOS only a front camera is available.
 #if os(iOS)
@@ -866,6 +1016,12 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             self.device = nil
         }
         latestBuffer = nil
+
+        // Reset text recognition state.
+        textRecognitionEnabled = false
+        textRecognitionLanguages = []
+        textRecognitionRespectsScanWindow = true
+        textNextRunAt = 0
     }
 
     private func releaseTexture() {
@@ -965,6 +1121,27 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     code: MobileScannerErrorCodes.BARCODE_ERROR,
                     message: error.localizedDescription, details: nil))
             }
+        }
+    }
+
+    /// Map a Dart `TextRecognitionScript.rawValue` to a list of BCP-47
+    /// language hints suitable for `VNRecognizeTextRequest`. Vision
+    /// gracefully ignores unsupported language tags on older OS versions,
+    /// falling back to its built-in Latin recognizer.
+    static func languagesForScript(_ script: String) -> [String] {
+        switch script {
+        case "latin":
+            return ["en-US"]
+        case "chinese":
+            return ["zh-Hans", "zh-Hant", "en-US"]
+        case "devanagari":
+            return ["hi-IN", "en-US"]
+        case "japanese":
+            return ["ja-JP", "en-US"]
+        case "korean":
+            return ["ko-KR", "en-US"]
+        default:
+            return []
         }
     }
 

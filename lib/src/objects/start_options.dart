@@ -4,6 +4,7 @@ import 'package:mobile_scanner/src/enums/barcode_format.dart';
 import 'package:mobile_scanner/src/enums/camera_facing.dart';
 import 'package:mobile_scanner/src/enums/camera_lens_type.dart';
 import 'package:mobile_scanner/src/enums/detection_speed.dart';
+import 'package:mobile_scanner/src/objects/text_recognition_options.dart';
 
 /// This class defines the different start options for the mobile scanner.
 class StartOptions {
@@ -20,6 +21,7 @@ class StartOptions {
     required this.invertImage,
     required this.autoZoom,
     required this.initialZoom,
+    this.textRecognition = TextRecognitionOptions.disabled,
   });
 
   /// The direction for the camera.
@@ -68,6 +70,15 @@ class StartOptions {
   /// Currently only supported on iOS, MacOS and Android.
   final double? initialZoom;
 
+  /// Configuration for the on-device text recognizer that is run alongside
+  /// the barcode scanner on every camera frame.
+  ///
+  /// Defaults to [TextRecognitionOptions.disabled], i.e. the recognizer is
+  /// not instantiated and no text events are emitted.
+  ///
+  /// Currently supported on Android, iOS and macOS.
+  final TextRecognitionOptions textRecognition;
+
   /// Converts this object to a map.
   Map<String, Object?> toMap() {
     return <String, Object?>{
@@ -87,6 +98,7 @@ class StartOptions {
       'invertImage': invertImage,
       'autoZoom': autoZoom,
       'initialZoom': initialZoom,
+      if (textRecognition.enabled) 'textRecognition': textRecognition.toMap(),
     };
   }
 }

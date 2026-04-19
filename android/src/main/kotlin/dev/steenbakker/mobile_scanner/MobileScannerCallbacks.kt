@@ -9,3 +9,5 @@ typealias MobileScannerErrorCallback = (error: String) -> Unit
 typealias TorchStateCallback = (state: Int) -> Unit
 typealias ZoomScaleStateCallback = (zoomScale: Double) -> Unit
 typealias MobileScannerStartedCallback = (parameters: MobileScannerStartParameters) -> Unit
+typealias TextRecognitionCallback = (text: Map<String, Any?>) -> Unit
+typealias TextRecognitionErrorCallback = (error: String) -> Unit

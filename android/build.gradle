@@ -53,11 +53,15 @@ android {
     dependencies {
         def useUnbundled = project.findProperty('dev.steenbakker.mobile_scanner.useUnbundled') ?: false
         if (useUnbundled.toBoolean()) {
-            // Dynamically downloaded model via Google Play Services
+            // Dynamically downloaded models via Google Play Services.
+            // ~600 KB total instead of ~5 MB bundled. Requires Play Services
+            // and a one-time, on-demand model download on first use.
             implementation 'com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1'
+            implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
         } else {
-            // Bundled model in app
+            // Bundled models in app.
             implementation 'com.google.mlkit:barcode-scanning:17.3.0'
+            implementation 'com.google.mlkit:text-recognition:16.0.1'
         }
 
         implementation 'androidx.camera:camera-lifecycle:1.5.3'

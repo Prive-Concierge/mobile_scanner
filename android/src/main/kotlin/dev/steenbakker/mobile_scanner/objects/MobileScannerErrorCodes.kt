@@ -25,5 +25,9 @@ class MobileScannerErrorCodes {
         const val UNSUPPORTED_OPERATION_ERROR = "MOBILE_SCANNER_UNSUPPORTED_OPERATION" // Reserved for future use.
         const val INVALID_FOCUS_POINT = "MOBILE_SCANNER_INVALID_FOCUS_POINT"
         const val INVALID_FOCUS_POINT_MESSAGE = "The focus coordinates are not valid."
+
+        // The error code 'TEXT_ERROR' does not have an error message,
+        // because it uses the error message from the underlying error.
+        const val TEXT_ERROR = "MOBILE_SCANNER_TEXT_ERROR"
     }
 }

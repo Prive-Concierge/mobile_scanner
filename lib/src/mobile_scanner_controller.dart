@@ -21,6 +21,8 @@ import 'package:mobile_scanner/src/objects/barcode_capture.dart';
 import 'package:mobile_scanner/src/objects/mobile_scanner_state.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/switch_camera_option.dart';
+import 'package:mobile_scanner/src/objects/text_capture.dart';
+import 'package:mobile_scanner/src/objects/text_recognition_options.dart';
 
 /// The controller for the [MobileScanner] widget.
 class MobileScannerController extends ValueNotifier<MobileScannerState> {
@@ -38,6 +40,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     this.invertImage = false,
     this.autoZoom = false,
     this.initialZoom,
+    this.textRecognition = TextRecognitionOptions.disabled,
   }) : detectionTimeoutMs =
            detectionSpeed == DetectionSpeed.normal ? detectionTimeoutMs : 0,
        assert(
@@ -134,8 +137,23 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// Android.
   final double? initialZoom;
 
+  /// Configuration for the on-device text recognizer that runs alongside
+  /// the barcode scanner on every camera frame.
+  ///
+  /// Defaults to [TextRecognitionOptions.disabled]. Set
+  /// [TextRecognitionOptions.enabled] to `true` to start receiving events
+  /// on the [recognizedText] stream.
+  ///
+  /// Currently supported on Android, iOS and macOS. Has no effect on the
+  /// web.
+  final TextRecognitionOptions textRecognition;
+
   /// The internal barcode controller, that listens for detected barcodes.
   final StreamController<BarcodeCapture> _barcodesController =
+      StreamController.broadcast();
+
+  /// The internal text controller, that listens for recognized text.
+  final StreamController<TextCapture> _recognizedTextController =
       StreamController.broadcast();
 
   /// Get the stream of scanned barcodes.
@@ -144,7 +162,18 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// a [MobileScannerBarcodeException] error is emitted to the stream.
   Stream<BarcodeCapture> get barcodes => _barcodesController.stream;
 
+  /// Get the stream of recognized text.
+  ///
+  /// Only emits when [textRecognition] was constructed with
+  /// `TextRecognitionOptions(enabled: true)`. Otherwise the stream is
+  /// silent for the lifetime of the controller.
+  ///
+  /// If an error occurred during recognition, a
+  /// [MobileScannerTextException] is emitted to the stream.
+  Stream<TextCapture> get recognizedText => _recognizedTextController.stream;
+
   StreamSubscription<BarcodeCapture?>? _barcodesSubscription;
+  StreamSubscription<TextCapture?>? _recognizedTextSubscription;
   StreamSubscription<TorchState>? _torchStateSubscription;
   StreamSubscription<double>? _zoomScaleSubscription;
   StreamSubscription<DeviceOrientation>? _deviceOrientationSubscription;
@@ -157,11 +186,13 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
 
   void _disposeListeners() {
     unawaited(_barcodesSubscription?.cancel());
+    unawaited(_recognizedTextSubscription?.cancel());
     unawaited(_torchStateSubscription?.cancel());
     unawaited(_zoomScaleSubscription?.cancel());
     unawaited(_deviceOrientationSubscription?.cancel());
 
     _barcodesSubscription = null;
+    _recognizedTextSubscription = null;
     _torchStateSubscription = null;
     _zoomScaleSubscription = null;
     _deviceOrientationSubscription = null;
@@ -187,6 +218,29 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
           // Errors are handled gracefully by forwarding them.
           cancelOnError: false,
         );
+
+    if (textRecognition.enabled) {
+      _recognizedTextSubscription = MobileScannerPlatform
+          .instance
+          .recognizedTextStream
+          .listen(
+            (text) {
+              if (_recognizedTextController.isClosed || text == null) {
+                return;
+              }
+
+              _recognizedTextController.add(text);
+            },
+            onError: (Object error) {
+              if (_recognizedTextController.isClosed) {
+                return;
+              }
+
+              _recognizedTextController.addError(error);
+            },
+            cancelOnError: false,
+          );
+    }
 
     _torchStateSubscription = MobileScannerPlatform.instance.torchStateStream
         .listen((torchState) {
@@ -460,6 +514,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
       invertImage: invertImage,
       autoZoom: autoZoom,
       initialZoom: initialZoom,
+      textRecognition: textRecognition,
     );
 
     try {
@@ -751,6 +806,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
 
     _isDisposed = true;
     unawaited(_barcodesController.close());
+    unawaited(_recognizedTextController.close());
     super.dispose();
 
     await MobileScannerPlatform.instance.dispose();

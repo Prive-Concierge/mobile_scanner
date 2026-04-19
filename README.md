@@ -252,6 +252,66 @@ Future<void> dispose() async {
 }
 ```
 
+### Text recognition (OCR)
+
+`mobile_scanner` ships an on-device text recognizer that reuses the
+camera frames already produced for barcode scanning, so you can scan a
+QR code and read printed text at the same time on a single camera
+stream.
+
+To enable it, pass `TextRecognitionOptions(enabled: true)` when
+constructing the controller and listen to `controller.recognizedText`:
+
+```dart
+final controller = MobileScannerController(
+  formats: const [BarcodeFormat.qrCode],
+  textRecognition: const TextRecognitionOptions(
+    enabled: true,
+    // Independent of barcode detection. 350-500ms is a good default
+    // for typical OCR throughput on mid-range phones.
+    throttleMs: 400,
+    // Restrict OCR to the active scanWindow rectangle (recommended).
+    respectScanWindow: true,
+  ),
+);
+
+controller.recognizedText.listen((TextCapture capture) {
+  print(capture.text);
+  for (final block in capture.blocks) {
+    for (final line in block.lines) {
+      print('  ${line.text} @ ${line.boundingBox}');
+    }
+  }
+});
+```
+
+Notes per platform:
+
+* **Android** – uses Google ML Kit. The default Gradle deps ship the
+  Latin recognizer (~1.5 MB). If you need other scripts, add the
+  matching ML Kit artifact to your `android/app/build.gradle`:
+
+  ```gradle
+  // pick whichever you need
+  implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'
+  implementation 'com.google.mlkit:text-recognition-devanagari:16.0.1'
+  implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+  implementation 'com.google.mlkit:text-recognition-korean:16.0.1'
+  ```
+
+  `mobile_scanner` discovers them at runtime via reflection. If the
+  requested script is not on the classpath the recognizer falls back
+  to Latin and logs a warning.
+
+* **iOS / macOS** – uses Apple Vision (`VNRecognizeTextRequest`),
+  available on iOS 13+ and macOS 10.15+. Older OS versions silently
+  no-op the text stream. Vision handles all supported scripts at the
+  OS level; `TextRecognitionScript` is mapped to a list of language
+  hints internally.
+
+* **Web** – text recognition is a no-op; the stream simply never
+  emits.
+
 ## Known Limitations
 
 ### `rawBytes` on iOS and macOS

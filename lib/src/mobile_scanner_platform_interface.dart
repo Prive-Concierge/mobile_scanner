@@ -6,6 +6,7 @@ import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
+import 'package:mobile_scanner/src/objects/text_capture.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 /// The platform interface for the `mobile_scanner` plugin.
@@ -33,6 +34,15 @@ abstract class MobileScannerPlatform extends PlatformInterface {
   /// Get the stream of barcode captures.
   Stream<BarcodeCapture?> get barcodesStream {
     throw UnimplementedError('barcodesStream has not been implemented.');
+  }
+
+  /// Get the stream of recognized text captures.
+  ///
+  /// Only emits when text recognition was enabled via
+  /// [StartOptions.textRecognition]. Platforms that do not support
+  /// text recognition (currently the web) emit nothing.
+  Stream<TextCapture?> get recognizedTextStream {
+    throw UnimplementedError('recognizedTextStream has not been implemented.');
   }
 
   /// Get the stream of torch state changes.

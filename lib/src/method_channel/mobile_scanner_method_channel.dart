@@ -17,6 +17,7 @@ import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
+import 'package:mobile_scanner/src/objects/text_capture.dart';
 import 'package:mobile_scanner/src/utils/parse_device_orientation_extension.dart';
 
 /// An implementation of [MobileScannerPlatform] that uses method channels.
@@ -28,6 +29,15 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   /// The name of the error event that is sent when a barcode scan error occurs.
   @visibleForTesting
   static const String kBarcodeErrorEventName = 'MOBILE_SCANNER_BARCODE_ERROR';
+
+  /// The name of the text recognition event.
+  @visibleForTesting
+  static const String kTextEventName = 'text';
+
+  /// The name of the error event that is sent when a text recognition
+  /// error occurs.
+  @visibleForTesting
+  static const String kTextErrorEventName = 'MOBILE_SCANNER_TEXT_ERROR';
 
   /// The name of the error event that is sent when an operation is not
   /// supported.
@@ -193,6 +203,40 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
     Error.throwWithStackTrace(error, stackTrace);
   }
 
+  /// Parse a [TextCapture] from the given event payload, or `null` if
+  /// the event does not look like a recognized text event.
+  TextCapture? _parseText(Map<Object?, Object?>? event) {
+    if (event == null) {
+      return null;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.macOS) {
+      return TextCapture.fromNative(event);
+    }
+
+    throw MobileScannerException(
+      errorCode: MobileScannerErrorCode.unsupported,
+      errorDetails: MobileScannerErrorDetails(
+        message: MobileScannerErrorCode.unsupported.message,
+      ),
+    );
+  }
+
+  /// Parse a [MobileScannerTextException] from the given [error] and
+  /// [stackTrace] and throw it.
+  Never _parseTextError(Object error, StackTrace stackTrace) {
+    if (error case PlatformException(
+      :final String code,
+      :final String? message,
+    ) when code == kTextErrorEventName) {
+      throw MobileScannerTextException(message);
+    }
+
+    Error.throwWithStackTrace(error, stackTrace);
+  }
+
   /// Request permission to access the camera.
   ///
   /// Throws a [MobileScannerException] if the permission is not granted.
@@ -245,6 +289,17 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
         .where((e) => e['name'] == kBarcodeEventName)
         .map(_parseBarcode)
         .handleError(_parseBarcodeError);
+  }
+
+  /// Handle incoming recognized-text events.
+  /// Error events are transformed to [MobileScannerTextException] where
+  /// possible.
+  @override
+  Stream<TextCapture?> get recognizedTextStream {
+    return eventsStream
+        .where((e) => e['name'] == kTextEventName)
+        .map(_parseText)
+        .handleError(_parseTextError);
   }
 
   @override

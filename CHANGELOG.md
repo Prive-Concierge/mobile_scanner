@@ -1,3 +1,15 @@
+## Unreleased
+
+**Highlights**
+
+* Added on-device text recognition that runs alongside barcode scanning on a single camera stream. Pass `TextRecognitionOptions(enabled: true)` to `MobileScannerController` and listen on `controller.recognizedText` for `TextCapture` events. Supported on Android (ML Kit), iOS (Apple Vision, iOS 13+) and macOS (Apple Vision, 10.15+); a no-op on the web.
+
+**Improvements**
+
+* [Android] Frame ref-counting in `captureOutput` so the `ImageProxy` is only closed after both barcode and (optional) text recognition complete.
+* [Android] New ML Kit dependency `com.google.mlkit:text-recognition:16.0.1` (or `play-services-mlkit-text-recognition:19.0.1` when the unbundled flavour is selected). Other scripts (Chinese, Devanagari, Japanese, Korean) are picked up via reflection if their artifacts are present on the classpath; otherwise the recognizer falls back to Latin with a single warn log.
+* [Apple] Text recognizer reuses the same `VNImageRequestHandler` as the barcode request, with no extra image decoding cost. Honours `scanWindow` via `regionOfInterest`.
+
 ## 7.2.1
 
 **Improvements**

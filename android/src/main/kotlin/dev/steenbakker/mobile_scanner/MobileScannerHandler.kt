@@ -83,6 +83,16 @@ class MobileScannerHandler(
         barcodeHandler.publishError(MobileScannerErrorCodes.BARCODE_ERROR, error, null)
     }
 
+    /// Forward recognized text events through the same event channel as
+    /// barcodes. The Dart side discriminates using the "name" field.
+    private val textCallback: TextRecognitionCallback = { text ->
+        barcodeHandler.publishEvent(text)
+    }
+
+    private val textErrorCallback: TextRecognitionErrorCallback = { error: String ->
+        barcodeHandler.publishError(MobileScannerErrorCodes.TEXT_ERROR, error, null)
+    }
+
     private var methodChannel: MethodChannel? = null
     private var deviceOrientationChannel: EventChannel? = null
 
@@ -183,6 +193,18 @@ class MobileScannerHandler(
         val invertImage: Boolean = call.argument<Boolean>("invertImage") ?: false
         val initialZoom: Double? = call.argument<Double?>("initialZoom")
 
+        // Optional text recognition configuration. When the map is missing
+        // or `enabled == false`, text recognition stays off.
+        val textRecognitionConfig: Map<*, *>? = call.argument<Map<*, *>>("textRecognition")
+        val textRecognitionEnabled: Boolean =
+            (textRecognitionConfig?.get("enabled") as? Boolean) ?: false
+        val textRecognitionScript: String? =
+            textRecognitionConfig?.get("script") as? String
+        val textRecognitionThrottleMs: Long =
+            (textRecognitionConfig?.get("throttleMs") as? Number)?.toLong() ?: 400L
+        val textRecognitionRespectScanWindow: Boolean =
+            (textRecognitionConfig?.get("respectScanWindow") as? Boolean) ?: true
+
         val barcodeScannerOptions: BarcodeScannerOptions? = buildBarcodeScannerOptions(formats, autoZoom)
 
         val position = MobileScannerCameraLensSelector.selectCamera(cameraManager, facing, lensType)
@@ -252,7 +274,12 @@ class MobileScannerHandler(
             timeout.toLong(),
             cameraResolution,
             invertImage,
-            initialZoom
+            initialZoom,
+            textCallback = if (textRecognitionEnabled) textCallback else null,
+            textErrorCallback = if (textRecognitionEnabled) textErrorCallback else null,
+            textRecognitionScript = textRecognitionScript,
+            textRecognitionThrottleMillis = textRecognitionThrottleMs,
+            textRecognitionRespectsScanWindow = textRecognitionRespectScanWindow,
         )
     }
 
