@@ -129,6 +129,58 @@ class MobileScanner(
         fun defaultBarcodeScannerFactory(options: BarcodeScannerOptions?) : BarcodeScanner {
             return if (options == null) BarcodeScanning.getClient() else BarcodeScanning.getClient(options)
         }
+
+        /**
+         * Decide whether a detected barcode is "aimed at" the scan window
+         * the caller drew on the preview.
+         *
+         * We match on the barcode's CENTER rather than requiring every
+         * corner to fall inside the scaled scan window. The strict
+         * "all corners inside" rule mirrors upstream `mobile_scanner`,
+         * but it diverges from the iOS implementation (which uses the
+         * scan window as Vision's `regionOfInterest` - a *crop*, not a
+         * post-filter) and silently drops dense QRs that overflow the
+         * cutout. Pix BR Codes hit this failure mode in practice: the
+         * payload is long enough that the user holds the QR close to
+         * keep modules legible, the corner points routinely cross the
+         * cutout boundary, and ML Kit's successful decode is thrown
+         * away here. Center-aiming preserves the original intent (only
+         * accept barcodes the user is aiming at) while keeping parity
+         * with iOS.
+         *
+         * Pure function - no Android framework deps - so unit tests can
+         * exercise it without bringing up CameraX.
+         */
+        @VisibleForTesting
+        fun isBarcodeCenterInScanWindow(
+            scanWindow: List<Float>,
+            centerX: Int,
+            centerY: Int,
+            rotationDegrees: Int,
+            sensorWidth: Int,
+            sensorHeight: Int,
+        ): Boolean {
+            return try {
+                val imageWidth = if (rotationDegrees % 180 == 0) sensorWidth else sensorHeight
+                val imageHeight = if (rotationDegrees % 180 == 0) sensorHeight else sensorWidth
+
+                val left = (scanWindow[0] * imageWidth).roundToInt()
+                val top = (scanWindow[1] * imageHeight).roundToInt()
+                val right = (scanWindow[2] * imageWidth).roundToInt()
+                val bottom = (scanWindow[3] * imageHeight).roundToInt()
+
+                // Mirrors `android.graphics.Rect.contains(x, y)` (inclusive
+                // on left/top, exclusive on right/bottom) without taking a
+                // dependency on the framework class - keeps this helper
+                // callable from plain JVM unit tests, where Rect's methods
+                // are stubbed to throw.
+                centerX in left until right && centerY in top until bottom
+            } catch (_: IllegalArgumentException) {
+                // Rounding of the scan window dimensions can fail, due to encountering NaN.
+                // If we get NaN, rather than give a false positive, just return false.
+                false
+            }
+        }
     }
 
     /**
@@ -557,34 +609,32 @@ class MobileScanner(
         }
     }
 
-    // Scales the scanWindow to the provided inputImage and checks if that scaled
-    // scanWindow contains the barcode.
+    // Instance entry point retained for call sites that already hold an
+    // `ImageProxy`. Computes the barcode's centroid up front so the
+    // pure decision (in [Companion.isBarcodeCenterInScanWindow]) doesn't
+    // touch any Android framework types - that lets unit tests target
+    // the helper without constructing a `MobileScanner` (which would
+    // transitively boot CameraX and isn't safe under plain JVM tests).
     @VisibleForTesting
     fun isBarcodeInScanWindow(
         scanWindow: List<Float>,
         barcode: Barcode,
         inputImage: ImageProxy
     ): Boolean {
-        val cornerPoints = barcode.cornerPoints ?: return false
+        val cornerPoints = barcode.cornerPoints
+        if (cornerPoints == null || cornerPoints.isEmpty()) return false
 
-        try {
-            val rotationDegrees = inputImage.imageInfo.rotationDegrees
-            val imageWidth = if (rotationDegrees % 180 == 0) inputImage.width else inputImage.height
-            val imageHeight = if (rotationDegrees % 180 == 0) inputImage.height else inputImage.width
+        val centerX = (cornerPoints.sumOf { it.x } / cornerPoints.size.toDouble()).roundToInt()
+        val centerY = (cornerPoints.sumOf { it.y } / cornerPoints.size.toDouble()).roundToInt()
 
-            val left = (scanWindow[0] * imageWidth).roundToInt()
-            val top = (scanWindow[1] * imageHeight).roundToInt()
-            val right = (scanWindow[2] * imageWidth).roundToInt()
-            val bottom = (scanWindow[3] * imageHeight).roundToInt()
-
-            val scaledScanWindow = Rect(left, top, right, bottom)
-
-            return cornerPoints.all { scaledScanWindow.contains(it.x, it.y) }
-        } catch (_: IllegalArgumentException) {
-            // Rounding of the scan window dimensions can fail, due to encountering NaN.
-            // If we get NaN, rather than give a false positive, just return false.
-            return false
-        }
+        return isBarcodeCenterInScanWindow(
+            scanWindow = scanWindow,
+            centerX = centerX,
+            centerY = centerY,
+            rotationDegrees = inputImage.imageInfo.rotationDegrees,
+            sensorWidth = inputImage.width,
+            sensorHeight = inputImage.height,
+        )
     }
 
     /**
