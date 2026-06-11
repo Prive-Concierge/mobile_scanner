@@ -64,6 +64,11 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// `Date().timeIntervalSince1970` units.
     var textNextRunAt: Double = 0.0
 
+    /// Re-entrancy guard for the text recognizer. OCR runs on its own
+    /// dispatch so a slow `.accurate` pass never delays barcode
+    /// detection; this flag stops passes from piling up behind it.
+    var textCurrentlyBeingProcessed = false
+
     /// Whether to also sample the average luma of every frame. Sampling
     /// is allocation-free and runs synchronously on the capture queue.
     var lumaSamplingEnabled: Bool = false
@@ -300,17 +305,36 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                         barcodeRequest.regionOfInterest = scanWindow
                     }
 
-                    // Optionally also recognize text on this frame.
-                    var requests: [VNRequest] = [barcodeRequest]
-                    if self.textRecognitionEnabled && currentTime >= self.textNextRunAt {
+                    // Optionally also recognize text on this frame. The OCR
+                    // pass runs on its own queue with its own request
+                    // handler: `.accurate` recognition can take hundreds of
+                    // milliseconds and performing it inside the barcode
+                    // `perform` call would hold `imagesCurrentlyBeingProcessed`
+                    // and starve QR detection. `CGImage` is immutable, so
+                    // sharing `currentImage` across queues is safe.
+                    if self.textRecognitionEnabled
+                        && currentTime >= self.textNextRunAt
+                        && !self.textCurrentlyBeingProcessed {
                         self.textNextRunAt = currentTime + self.textRecognitionThrottleSeconds
-                        if #available(iOS 13.0, macOS 10.15, *),
-                           let textRequest = self.makeTextRecognitionRequest(image: currentImage) {
-                            requests.append(textRequest)
+                        if #available(iOS 13.0, macOS 10.15, *) {
+                            self.textCurrentlyBeingProcessed = true
+                            DispatchQueue.global(qos: .utility).async { [weak self] in
+                                guard let self = self else { return }
+                                defer { self.textCurrentlyBeingProcessed = false }
+                                guard let textRequest = self.makeTextRecognitionRequest(image: currentImage) else {
+                                    return
+                                }
+                                let textHandler = VNImageRequestHandler(cgImage: currentImage)
+                                // Errors are routed through the request's
+                                // completion handler; a failed perform here
+                                // simply skips this pass — the next throttle
+                                // tick retries with a fresh frame.
+                                try? textHandler.perform([textRequest])
+                            }
                         }
                     }
 
-                    try imageRequestHandler.perform(requests)
+                    try imageRequestHandler.perform([barcodeRequest])
                 } catch let error {
                     imagesCurrentlyBeingProcessed = false
                     
@@ -329,6 +353,14 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// not available on this OS version.
     @available(iOS 13.0, macOS 10.15, *)
     private func makeTextRecognitionRequest(image: CGImage) -> VNRecognizeTextRequest? {
+        // When the request is constrained to a region of interest, Vision
+        // reports observation bounding boxes normalized to that ROI — not
+        // to the full image. Capture the applied window here so the
+        // serializer can remap boxes back into full-image space, exactly
+        // like the barcode path does in `VNBarcodeObservation.toMap`.
+        let appliedRegionOfInterest: CGRect? =
+            textRecognitionRespectsScanWindow ? scanWindow : nil
+
         let request = VNRecognizeTextRequest { [weak self] request, error in
             guard let self = self else { return }
             if let error = error {
@@ -344,7 +376,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 return
             }
 
-            let payload = self.serializeText(observations: observations, image: image)
+            let payload = self.serializeText(
+                observations: observations,
+                image: image,
+                regionOfInterest: appliedRegionOfInterest)
             DispatchQueue.main.async {
                 self.sink?(payload)
             }
@@ -357,7 +392,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         if !textRecognitionLanguages.isEmpty {
             request.recognitionLanguages = textRecognitionLanguages
         }
-        if textRecognitionRespectsScanWindow, let window = scanWindow {
+        if let window = appliedRegionOfInterest {
             request.regionOfInterest = window
         }
 
@@ -371,7 +406,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     @available(iOS 13.0, macOS 10.15, *)
     private func serializeText(
         observations: [VNRecognizedTextObservation],
-        image: CGImage
+        image: CGImage,
+        regionOfInterest: CGRect? = nil
     ) -> [String: Any?] {
 #if os(iOS)
         // The frame is delivered to Flutter in portrait orientation, see
@@ -392,7 +428,19 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             // Vision reports normalized coordinates with origin in the
             // bottom-left. Convert to image-pixel coordinates with origin
             // in the top-left to match the BarcodePainter convention.
-            let bb = observation.boundingBox
+            //
+            // When the request carried a `regionOfInterest`, observation
+            // boxes are normalized to that ROI rather than the full image
+            // — un-normalize first so consumers always receive full-image
+            // pixel coordinates regardless of the scan window.
+            var bb = observation.boundingBox
+            if let roi = regionOfInterest {
+                bb = CGRect(
+                    x: roi.minX + bb.minX * roi.width,
+                    y: roi.minY + bb.minY * roi.height,
+                    width: bb.width * roi.width,
+                    height: bb.height * roi.height)
+            }
             let left = Double(bb.minX) * displayWidth
             let right = Double(bb.maxX) * displayWidth
             let top = (1.0 - Double(bb.maxY)) * displayHeight
@@ -1053,7 +1101,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
         latestBuffer = nil
 
-        // Reset text recognition state.
+        // Reset text recognition state. `textCurrentlyBeingProcessed` is
+        // deliberately left to the in-flight pass's `defer` — clearing it
+        // here while a pass is still running would let a second pass start
+        // and race the first.
         textRecognitionEnabled = false
         textRecognitionLanguages = []
         textRecognitionRespectsScanWindow = true

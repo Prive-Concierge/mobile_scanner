@@ -376,9 +376,17 @@ class MobileScanner(
             return
         }
 
-        val portrait = (camera?.cameraInfo?.sensorRotationDegrees ?: 0) % 180 == 0
-        val displayWidth = if (portrait) inputImage.width else inputImage.height
-        val displayHeight = if (portrait) inputImage.height else inputImage.width
+        // ML Kit reports block/line bounding boxes in the coordinate space
+        // of the upright image — the buffer rotated by the rotation passed
+        // to `InputImage.fromMediaImage`, i.e. `imageInfo.rotationDegrees`.
+        // Derive the emitted frame dimensions from that same rotation so
+        // boxes, crop rect and frame size always agree (the barcode path
+        // uses `sensorRotationDegrees` for upstream parity; the two match
+        // on every mainstream device but are not guaranteed to).
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        val upright = rotation % 180 == 0
+        val displayWidth = if (upright) inputImage.width else inputImage.height
+        val displayHeight = if (upright) inputImage.height else inputImage.width
 
         // Pre-compute the scan window in input-image coordinates if cropping
         // was requested. Doing it once here avoids repeated maths inside the
@@ -386,14 +394,11 @@ class MobileScanner(
         val cropRect: Rect? = if (textRecognitionRespectScanWindow) {
             scanWindow?.let { window ->
                 try {
-                    val rotation = imageProxy.imageInfo.rotationDegrees
-                    val imgW = if (rotation % 180 == 0) imageProxy.width else imageProxy.height
-                    val imgH = if (rotation % 180 == 0) imageProxy.height else imageProxy.width
                     Rect(
-                        (window[0] * imgW).roundToInt(),
-                        (window[1] * imgH).roundToInt(),
-                        (window[2] * imgW).roundToInt(),
-                        (window[3] * imgH).roundToInt(),
+                        (window[0] * displayWidth).roundToInt(),
+                        (window[1] * displayHeight).roundToInt(),
+                        (window[2] * displayWidth).roundToInt(),
+                        (window[3] * displayHeight).roundToInt(),
                     )
                 } catch (_: IllegalArgumentException) {
                     null
