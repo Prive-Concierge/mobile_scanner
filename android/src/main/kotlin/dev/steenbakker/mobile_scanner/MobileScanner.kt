@@ -821,6 +821,23 @@ class MobileScanner(
 
                         return@addListener
                     }
+                } else {
+                    // Pin the zoom ratio even when the caller did not ask
+                    // for one. On logical multi-camera devices (Pixel 8/9/10
+                    // family especially) an unset zoom lets the OS
+                    // auto-switch physical lenses (macro/ultrawide) as the
+                    // focus distance drops — which is exactly what happens
+                    // when aiming at a barcode up close. The switch is an
+                    // abrupt field-of-view jump that reads as the camera
+                    // "zooming in and out" on its own. An explicit ratio
+                    // keeps the logical camera on the main lens.
+                    // See https://issuetracker.google.com/issues/358257249.
+                    try {
+                        it.cameraControl.setZoomRatio(1f)
+                    } catch (_: Exception) {
+                        // Best-effort: 1.0x is valid on every device we know
+                        // of, but a failure here must not abort start().
+                    }
                 }
             }
 
