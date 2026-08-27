@@ -315,9 +315,9 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   /// `[0, 1]` so consumers don't have to defensively bound them.
   @override
   Stream<double> get lumaStream {
-    return eventsStream
-        .where((event) => event['name'] == kLumaEventName)
-        .map((event) {
+    return eventsStream.where((event) => event['name'] == kLumaEventName).map((
+      event,
+    ) {
       final raw = event['data'];
       if (raw is num) {
         return raw.toDouble().clamp(0.0, 1.0);
@@ -379,11 +379,18 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   Future<TextCapture?> analyzeImageText(
     String path, {
     TextRecognitionScript script = TextRecognitionScript.latin,
+    bool languageCorrection = true,
+    int candidateCount = 1,
   }) async {
     try {
       final result = await methodChannel.invokeMapMethod<Object?, Object?>(
         kAnalyzeImageTextMethodName,
-        {'filePath': path, 'script': script.rawValue},
+        {
+          'filePath': path,
+          'script': script.rawValue,
+          'languageCorrection': languageCorrection,
+          'candidateCount': candidateCount,
+        },
       );
 
       return _parseText(result);

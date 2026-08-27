@@ -176,8 +176,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
 
   /// The internal luma controller, that listens for average luma samples
   /// (normalized to the `[0, 1]` range).
-  final StreamController<double> _lumaController =
-      StreamController.broadcast();
+  final StreamController<double> _lumaController = StreamController.broadcast();
 
   /// Get the stream of scanned barcodes.
   ///
@@ -298,8 +297,9 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     }
 
     if (lumaSampling.enabled) {
-      _lumaSubscription =
-          MobileScannerPlatform.instance.lumaStream.listen((sample) {
+      _lumaSubscription = MobileScannerPlatform.instance.lumaStream.listen((
+        sample,
+      ) {
         if (_lumaController.isClosed) return;
         _lumaController.add(sample);
       }, cancelOnError: false);
@@ -427,15 +427,29 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// on the classpath; if it's missing the recognizer transparently
   /// falls back to Latin.
   ///
+  /// [languageCorrection] and [candidateCount] mirror the live-stream
+  /// options of the same name — see
+  /// [TextRecognitionOptions.languageCorrection] and
+  /// [TextRecognitionOptions.candidateCount]. Both are Apple Vision
+  /// only. Keeping them in step with the options passed to [start] is
+  /// usually what you want, so a screenshot and the camera read an
+  /// identifier the same way.
+  ///
   /// Throws [MobileScannerTextException] when the underlying recognizer
   /// reports an error, and [UnsupportedError] when the platform does
   /// not support still-image text recognition.
   Future<TextCapture?> analyzeImageText(
     String path, {
     TextRecognitionScript script = TextRecognitionScript.latin,
+    bool languageCorrection = true,
+    int candidateCount = 1,
   }) {
-    return MobileScannerPlatform.instance
-        .analyzeImageText(path, script: script);
+    return MobileScannerPlatform.instance.analyzeImageText(
+      path,
+      script: script,
+      languageCorrection: languageCorrection,
+      candidateCount: candidateCount,
+    );
   }
 
   /// Build a camera preview widget.

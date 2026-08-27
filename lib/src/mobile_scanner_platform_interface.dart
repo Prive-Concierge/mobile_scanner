@@ -98,6 +98,8 @@ abstract class MobileScannerPlatform extends PlatformInterface {
   Future<TextCapture?> analyzeImageText(
     String path, {
     TextRecognitionScript script = TextRecognitionScript.latin,
+    bool languageCorrection = true,
+    int candidateCount = 1,
   }) {
     throw UnimplementedError('analyzeImageText() has not been implemented.');
   }

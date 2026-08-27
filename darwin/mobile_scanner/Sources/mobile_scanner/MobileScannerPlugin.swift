@@ -57,6 +57,14 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// Whether the recognizer should clamp to `scanWindow` when one is set.
     var textRecognitionRespectsScanWindow: Bool = true
 
+    /// Whether Vision may apply linguistic correction to recognized text.
+    /// Callers scanning identifiers rather than prose should turn this
+    /// off — see `TextRecognitionOptions.languageCorrection`.
+    var textRecognitionLanguageCorrection: Bool = true
+
+    /// How many ranked alternative readings to report per line.
+    var textRecognitionCandidateCount: Int = 1
+
     /// Throttle for the text recognizer, independent of the barcode scanner.
     var textRecognitionThrottleSeconds: Double = 0.4
 
@@ -388,7 +396,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         // Accuracy over speed: the recognizer only runs at most every
         // `textRecognitionThrottleSeconds`, so the extra cycles are worth it.
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = textRecognitionLanguageCorrection
         if !textRecognitionLanguages.isEmpty {
             request.recognitionLanguages = textRecognitionLanguages
         }
@@ -423,7 +431,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         var joined = ""
 
         for observation in observations {
-            guard let candidate = observation.topCandidates(1).first else { continue }
+            let ranked = observation.topCandidates(textRecognitionCandidateCount)
+            guard let candidate = ranked.first else { continue }
             let lineText = candidate.string
             // Vision reports normalized coordinates with origin in the
             // bottom-left. Convert to image-pixel coordinates with origin
@@ -457,6 +466,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 "text": lineText,
                 "confidence": Double(candidate.confidence),
                 "boundingBox": boundingBox,
+                "candidates": ranked.map { $0.string },
             ]
             blocks.append([
                 "text": lineText,
@@ -589,11 +599,17 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         textRecognitionEnabled = false
         textRecognitionLanguages = []
         textRecognitionRespectsScanWindow = true
+        textRecognitionLanguageCorrection = true
+        textRecognitionCandidateCount = 1
         textRecognitionThrottleSeconds = 0.4
         textNextRunAt = 0
         if let textConfig = (call.arguments as? [String: Any])?["textRecognition"] as? [String: Any] {
             textRecognitionEnabled = (textConfig["enabled"] as? Bool) ?? false
             textRecognitionRespectsScanWindow = (textConfig["respectScanWindow"] as? Bool) ?? true
+            textRecognitionLanguageCorrection = (textConfig["languageCorrection"] as? Bool) ?? true
+            if let candidateCount = textConfig["candidateCount"] as? Int {
+                textRecognitionCandidateCount = max(1, candidateCount)
+            }
             if let throttleMs = textConfig["throttleMs"] as? Int {
                 textRecognitionThrottleSeconds = max(0.0, Double(throttleMs) / 1000.0)
             }
@@ -1246,6 +1262,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
         let script = argReader.string(key: "script") ?? "latin"
         let languages = MobileScannerPlugin.languagesForScript(script)
+        // Mirror the live path's knobs so a still analysed from the
+        // gallery reads identifiers the same way the camera does.
+        let languageCorrection = argReader.bool(key: "languageCorrection") ?? true
+        let candidateCount = max(1, argReader.int(key: "candidateCount") ?? 1)
 
         let fileUrl = URL(fileURLWithPath: filePath)
         guard let ciImage = CIImage(contentsOf: fileUrl) else {
@@ -1288,12 +1308,14 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 return
             }
             let payload = self.serializeStillImageText(
-                observations: observations, image: cgImage)
+                observations: observations,
+                image: cgImage,
+                candidateCount: candidateCount)
             DispatchQueue.main.async { result(payload) }
         }
 
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = languageCorrection
         if !languages.isEmpty {
             request.recognitionLanguages = languages
         }
@@ -1316,7 +1338,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     @available(iOS 13.0, macOS 10.15, *)
     private func serializeStillImageText(
         observations: [VNRecognizedTextObservation],
-        image: CGImage
+        image: CGImage,
+        candidateCount: Int = 1
     ) -> [String: Any?] {
         let displayWidth = Double(image.width)
         let displayHeight = Double(image.height)
@@ -1325,7 +1348,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         var joined = ""
 
         for observation in observations {
-            guard let candidate = observation.topCandidates(1).first else { continue }
+            let ranked = observation.topCandidates(candidateCount)
+            guard let candidate = ranked.first else { continue }
             let lineText = candidate.string
             let bb = observation.boundingBox
             let left = Double(bb.minX) * displayWidth
@@ -1340,6 +1364,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 "text": lineText,
                 "confidence": Double(candidate.confidence),
                 "boundingBox": boundingBox,
+                "candidates": ranked.map { $0.string },
             ]
             blocks.append([
                 "text": lineText,

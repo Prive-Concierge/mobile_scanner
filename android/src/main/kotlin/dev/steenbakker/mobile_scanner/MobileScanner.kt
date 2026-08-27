@@ -468,6 +468,12 @@ class MobileScanner(
                                 "bottom" to it.bottom.toDouble(),
                             )
                         },
+                        // ML Kit commits to one reading and exposes no
+                        // alternatives, so the candidate list is always
+                        // the single recognized string. Sent explicitly
+                        // rather than omitted so `TextLine.candidates`
+                        // has the same shape on both platforms.
+                        "candidates" to listOf(line.text),
                     )
                 )
             }

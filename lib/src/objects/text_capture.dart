@@ -1,4 +1,5 @@
 /// @docImport 'package:mobile_scanner/src/mobile_scanner_controller.dart';
+/// @docImport 'package:mobile_scanner/src/objects/text_recognition_options.dart';
 library;
 
 import 'dart:ui';
@@ -10,18 +11,28 @@ class TextLine {
     required this.text,
     this.boundingBox,
     this.confidence,
+    this.candidates = const <String>[],
   });
 
   /// Internal: parse from the wire format produced by the native side.
   factory TextLine.fromNative(Map<Object?, Object?> data) {
+    final text = (data['text'] as String?) ?? '';
+    final rawCandidates = data['candidates'] as List<Object?>?;
     return TextLine(
-      text: (data['text'] as String?) ?? '',
+      text: text,
       boundingBox: _readRect(data['boundingBox']),
       confidence: (data['confidence'] as num?)?.toDouble(),
+      candidates:
+          rawCandidates == null
+              ? <String>[text]
+              : List<String>.unmodifiable(rawCandidates.whereType<String>()),
     );
   }
 
   /// The recognized text for this line.
+  ///
+  /// Always equal to `candidates.first` when any candidate was
+  /// reported: this is the recognizer's preferred reading.
   final String text;
 
   /// The axis-aligned bounding box of the line in the **input image**
@@ -39,6 +50,21 @@ class TextLine {
   /// confidence value (Android ML Kit does not report it; Apple Vision
   /// does on iOS 13 / macOS 10.15 and newer).
   final double? confidence;
+
+  /// Alternative readings of this line, best first, with [text] at
+  /// index 0.
+  ///
+  /// Holds a single entry unless
+  /// [TextRecognitionOptions.candidateCount] was raised, and always a
+  /// single entry on Android. Never empty for a line that came from the
+  /// native side.
+  ///
+  /// The recognizer ranks these by visual likelihood alone. That makes
+  /// them useful precisely where it has no way to break a tie a caller
+  /// can break trivially — `0` against `O`, `5` against `6`, `1`
+  /// against `7` inside an identifier whose format the caller knows and
+  /// the recognizer does not.
+  final List<String> candidates;
 }
 
 /// A block of recognized text, made up of one or more [TextLine]s.
@@ -58,11 +84,10 @@ class TextBlock {
 
   /// Internal: parse from the wire format produced by the native side.
   factory TextBlock.fromNative(Map<Object?, Object?> data) {
-    final rawLines =
-        (data['lines'] as List<Object?>? ?? const <Object?>[])
-            .whereType<Map<Object?, Object?>>()
-            .map(TextLine.fromNative)
-            .toList(growable: false);
+    final rawLines = (data['lines'] as List<Object?>? ?? const <Object?>[])
+        .whereType<Map<Object?, Object?>>()
+        .map(TextLine.fromNative)
+        .toList(growable: false);
 
     return TextBlock(
       text: (data['text'] as String?) ?? '',
@@ -98,11 +123,10 @@ class TextCapture {
   /// Internal: parse from the wire format produced by the native side.
   factory TextCapture.fromNative(Map<Object?, Object?> event) {
     final data = event['data'] as Map<Object?, Object?>? ?? const {};
-    final rawBlocks =
-        (data['blocks'] as List<Object?>? ?? const <Object?>[])
-            .whereType<Map<Object?, Object?>>()
-            .map(TextBlock.fromNative)
-            .toList(growable: false);
+    final rawBlocks = (data['blocks'] as List<Object?>? ?? const <Object?>[])
+        .whereType<Map<Object?, Object?>>()
+        .map(TextBlock.fromNative)
+        .toList(growable: false);
 
     final width = (data['width'] as num?)?.toDouble();
     final height = (data['height'] as num?)?.toDouble();
