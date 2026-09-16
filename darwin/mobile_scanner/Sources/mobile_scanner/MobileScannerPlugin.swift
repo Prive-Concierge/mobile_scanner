@@ -1140,19 +1140,6 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     }
 
     func analyzeImage(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        // The iOS Simulator cannot use some of the GPU features that are required for the Vision API.
-        // Thus analyzing images is not supported on the iOS Simulator.
-        //
-        // See https://forums.developer.apple.com/forums/thread/696714
-#if os(iOS) && targetEnvironment(simulator)
-        result(FlutterError(
-            code: MobileScannerErrorCodes.UNSUPPORTED_OPERATION_ERROR,
-            message: MobileScannerErrorCodes.ANALYZE_IMAGE_IOS_SIMULATOR_NOT_SUPPORTED_ERROR_MESSAGE,
-            details: nil
-        ))
-        return
-#endif
-
         let argReader = MapArgumentReader(call.arguments as? [String: Any])
         let symbologies:[VNBarcodeSymbology] = argReader.toSymbology()
 
@@ -1163,7 +1150,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         let fileUrl = URL(fileURLWithPath: filePath)
 
-        guard let ciImage = CIImage(contentsOf: fileUrl) else {
+        // Honour EXIF orientation. Camera-roll photos are stored
+        // landscape with a rotation tag; without applying it, Vision
+        // reads a portrait poster sideways and drops most of its text.
+        guard let ciImage = CIImage(contentsOf: fileUrl, options: [.applyOrientationProperty: true]) else {
             result(FlutterError(
                 code: MobileScannerErrorCodes.BARCODE_ERROR,
                 message: MobileScannerErrorCodes.ANALYZE_IMAGE_NO_VALID_IMAGE_ERROR_MESSAGE,
@@ -1172,7 +1162,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             return
         }
 
-        let imageRequestHandler = VNImageRequestHandler(ciImage: ciImage, orientation: CGImagePropertyOrientation.up, options: [:])
+        let imageRequestHandler = VNImageRequestHandler(ciImage: ciImage, orientation: .up, options: [:])
 
         do {
             let barcodeRequest: VNDetectBarcodesRequest = VNDetectBarcodesRequest(
@@ -1236,16 +1226,6 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     /// the Dart side can reuse `TextCapture.fromNative` without
     /// branching on the call origin.
     func analyzeImageText(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-#if os(iOS) && targetEnvironment(simulator)
-        // Same Vision-on-Simulator caveat as the barcode analyzer.
-        result(FlutterError(
-            code: MobileScannerErrorCodes.UNSUPPORTED_OPERATION_ERROR,
-            message: MobileScannerErrorCodes.ANALYZE_IMAGE_IOS_SIMULATOR_NOT_SUPPORTED_ERROR_MESSAGE,
-            details: nil
-        ))
-        return
-#endif
-
         guard #available(iOS 13.0, macOS 10.15, *) else {
             result(FlutterError(
                 code: MobileScannerErrorCodes.UNSUPPORTED_OPERATION_ERROR,
@@ -1268,7 +1248,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         let candidateCount = max(1, argReader.int(key: "candidateCount") ?? 1)
 
         let fileUrl = URL(fileURLWithPath: filePath)
-        guard let ciImage = CIImage(contentsOf: fileUrl) else {
+        // Apply EXIF orientation up front (see analyzeImage) so the
+        // recognised line geometry matches the image as displayed.
+        guard let ciImage = CIImage(contentsOf: fileUrl, options: [.applyOrientationProperty: true]) else {
             result(FlutterError(
                 code: MobileScannerErrorCodes.TEXT_ERROR,
                 message: MobileScannerErrorCodes.ANALYZE_IMAGE_NO_VALID_IMAGE_ERROR_MESSAGE,
@@ -1287,41 +1269,18 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             return
         }
 
-        let imageRequestHandler = VNImageRequestHandler(
-            cgImage: cgImage,
-            orientation: CGImagePropertyOrientation.up,
-            options: [:])
-
-        let request = VNRecognizeTextRequest { [weak self] req, err in
-            guard let self = self else { return }
-            if let err = err {
-                DispatchQueue.main.async {
-                    result(FlutterError(
-                        code: MobileScannerErrorCodes.TEXT_ERROR,
-                        message: err.localizedDescription, details: nil))
-                }
-                return
-            }
-            guard let observations = req.results as? [VNRecognizedTextObservation],
-                  !observations.isEmpty else {
+        let recognizer = StillTextRecognizer(
+            languages: languages,
+            languageCorrection: languageCorrection,
+            candidateCount: candidateCount)
+        do {
+            let lines = try recognizer.recognize(cgImage)
+            if lines.isEmpty {
                 DispatchQueue.main.async { result(nil) }
                 return
             }
-            let payload = self.serializeStillImageText(
-                observations: observations,
-                image: cgImage,
-                candidateCount: candidateCount)
+            let payload = MobileScannerPlugin.serializeStillTextLines(lines, image: cgImage)
             DispatchQueue.main.async { result(payload) }
-        }
-
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = languageCorrection
-        if !languages.isEmpty {
-            request.recognitionLanguages = languages
-        }
-
-        do {
-            try imageRequestHandler.perform([request])
         } catch let error {
             DispatchQueue.main.async {
                 result(FlutterError(
@@ -1331,48 +1290,37 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         }
     }
 
-    /// Serialize text observations from a still image (as opposed to a
-    /// live camera frame). The live variant rotates dimensions to match
-    /// the portrait-locked preview, which we don't want for an arbitrary
-    /// gallery image — those should report their natural width/height.
+    /// Serialize merged still-image lines (see [StillTextRecognizer]).
+    /// Unlike the live variant this does not rotate dimensions to the
+    /// portrait-locked preview — a gallery image reports its natural
+    /// width/height. Payload shape matches the live `recognizedText`
+    /// stream so Dart reuses `TextCapture.fromNative`.
     @available(iOS 13.0, macOS 10.15, *)
-    private func serializeStillImageText(
-        observations: [VNRecognizedTextObservation],
-        image: CGImage,
-        candidateCount: Int = 1
+    private static func serializeStillTextLines(
+        _ lines: [StillTextLine],
+        image: CGImage
     ) -> [String: Any?] {
-        let displayWidth = Double(image.width)
-        let displayHeight = Double(image.height)
-
         var blocks: [[String: Any?]] = []
         var joined = ""
 
-        for observation in observations {
-            let ranked = observation.topCandidates(candidateCount)
-            guard let candidate = ranked.first else { continue }
-            let lineText = candidate.string
-            let bb = observation.boundingBox
-            let left = Double(bb.minX) * displayWidth
-            let right = Double(bb.maxX) * displayWidth
-            let top = (1.0 - Double(bb.maxY)) * displayHeight
-            let bottom = (1.0 - Double(bb.minY)) * displayHeight
-
+        for line in lines {
             let boundingBox: [String: Any?] = [
-                "left": left, "top": top, "right": right, "bottom": bottom,
+                "left": Double(line.box.minX), "top": Double(line.box.minY),
+                "right": Double(line.box.maxX), "bottom": Double(line.box.maxY),
             ]
             let lineMap: [String: Any?] = [
-                "text": lineText,
-                "confidence": Double(candidate.confidence),
+                "text": line.text,
+                "confidence": Double(line.confidence),
                 "boundingBox": boundingBox,
-                "candidates": ranked.map { $0.string },
+                "candidates": line.candidates,
             ]
             blocks.append([
-                "text": lineText,
+                "text": line.text,
                 "boundingBox": boundingBox,
                 "lines": [lineMap],
             ])
             if !joined.isEmpty { joined += "\n\n" }
-            joined += lineText
+            joined += line.text
         }
 
         return [
@@ -1380,8 +1328,8 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             "data": [
                 "text": joined,
                 "blocks": blocks,
-                "width": displayWidth,
-                "height": displayHeight,
+                "width": Double(image.width),
+                "height": Double(image.height),
             ],
         ]
     }
