@@ -22,6 +22,7 @@ class StartOptions {
     required this.invertImage,
     required this.autoZoom,
     required this.initialZoom,
+    this.initialZoomRatio,
     this.textRecognition = TextRecognitionOptions.disabled,
     this.lumaSampling = LumaSampling.disabled,
   });
@@ -72,6 +73,13 @@ class StartOptions {
   /// Currently only supported on iOS, MacOS and Android.
   final double? initialZoom;
 
+  /// The zoom ratio to start at, relative to the standard lens (`1.0` is
+  /// "1x"). Ignored when [initialZoom] is set.
+  ///
+  /// On iPhones whose back camera spans an ultra-wide lens, the camera
+  /// otherwise starts fully zoomed out, on the ultra-wide.
+  final double? initialZoomRatio;
+
   /// Configuration for the on-device text recognizer that is run alongside
   /// the barcode scanner on every camera frame.
   ///
@@ -110,6 +118,7 @@ class StartOptions {
       'invertImage': invertImage,
       'autoZoom': autoZoom,
       'initialZoom': initialZoom,
+      if (initialZoomRatio != null) 'initialZoomRatio': initialZoomRatio,
       if (textRecognition.enabled) 'textRecognition': textRecognition.toMap(),
       if (lumaSampling.enabled) 'lumaSampling': lumaSampling.toMap(),
     };

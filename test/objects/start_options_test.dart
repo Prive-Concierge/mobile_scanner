@@ -38,6 +38,39 @@ void main() {
       });
     });
 
+    test('toMap includes the initial zoom ratio only when set', () {
+      const withRatio = StartOptions(
+        cameraDirection: CameraFacing.back,
+        cameraLensType: CameraLensType.any,
+        cameraResolution: null,
+        detectionSpeed: DetectionSpeed.normal,
+        detectionTimeoutMs: 250,
+        formats: [],
+        returnImage: false,
+        torchEnabled: false,
+        invertImage: false,
+        autoZoom: false,
+        initialZoom: null,
+        initialZoomRatio: 1,
+      );
+      const withoutRatio = StartOptions(
+        cameraDirection: CameraFacing.back,
+        cameraLensType: CameraLensType.any,
+        cameraResolution: null,
+        detectionSpeed: DetectionSpeed.normal,
+        detectionTimeoutMs: 250,
+        formats: [],
+        returnImage: false,
+        torchEnabled: false,
+        invertImage: false,
+        autoZoom: false,
+        initialZoom: null,
+      );
+
+      expect(withRatio.toMap()['initialZoomRatio'], 1.0);
+      expect(withoutRatio.toMap().containsKey('initialZoomRatio'), isFalse);
+    });
+
     test('toMap includes camera resolution when provided', () {
       const options = StartOptions(
         cameraDirection: CameraFacing.back,

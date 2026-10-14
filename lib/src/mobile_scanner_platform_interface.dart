@@ -6,8 +6,10 @@ import 'package:mobile_scanner/src/enums/torch_state.dart';
 import 'package:mobile_scanner/src/method_channel/mobile_scanner_method_channel.dart';
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/scanner_frame.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/text_capture.dart';
+import 'package:mobile_scanner/src/objects/zoom_ratio_state.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 /// The platform interface for the `mobile_scanner` plugin.
@@ -66,6 +68,11 @@ abstract class MobileScannerPlatform extends PlatformInterface {
   Stream<double> get zoomScaleStateStream {
     throw UnimplementedError('zoomScaleStateStream has not been implemented.');
   }
+
+  /// Get the stream of zoom ratio changes.
+  ///
+  /// Empty on platforms that only report a zoom scale (currently the web).
+  Stream<ZoomRatioState> get zoomRatioStateStream => const Stream.empty();
 
   /// Analyze a local image file for barcodes.
   ///
@@ -126,6 +133,23 @@ abstract class MobileScannerPlatform extends PlatformInterface {
   /// while `1.0` indicates that the camera is fully zoomed in.
   Future<void> setZoomScale(double zoomScale) {
     throw UnimplementedError('setZoomScale() has not been implemented.');
+  }
+
+  /// Set the zoom as a ratio of the standard lens, where `1.0` is "1x".
+  ///
+  /// The platform clamps [ratio] to the camera's range. When [animated] is
+  /// true the zoom ramps smoothly, as for a preset tap; otherwise it jumps,
+  /// as a pinch should.
+  Future<void> setZoomRatio(double ratio, {bool animated = false}) {
+    throw UnimplementedError('setZoomRatio() has not been implemented.');
+  }
+
+  /// Capture the latest camera frame as an upright JPEG.
+  ///
+  /// The frame is the one the preview shows, at the analysis resolution, so
+  /// it can stand in for the preview the moment it is frozen.
+  Future<ScannerFrame> captureFrame() {
+    throw UnimplementedError('captureFrame() has not been implemented.');
   }
 
   /// Set the focus position for the camera.

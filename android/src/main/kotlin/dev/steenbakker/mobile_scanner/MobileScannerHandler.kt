@@ -132,6 +132,13 @@ class MobileScannerHandler(
         barcodeHandler.publishEvent(mapOf("name" to "zoomScaleState", "data" to zoomScale))
     }
 
+    private val zoomRatioStateCallback: ZoomRatioStateCallback = { ratio, minRatio, maxRatio ->
+        barcodeHandler.publishEvent(mapOf(
+            "name" to "zoomRatioState",
+            "data" to mapOf("ratio" to ratio, "min" to minRatio, "max" to maxRatio),
+        ))
+    }
+
     init {
         methodChannel = MethodChannel(binaryMessenger,
             "dev.steenbakker.mobile_scanner/scanner/method")
@@ -193,6 +200,8 @@ class MobileScannerHandler(
             "analyzeImageText" -> analyzeImageText(call, result)
             "setScale" -> setScale(call, result)
             "resetScale" -> resetScale(result)
+            "setZoomRatio" -> setZoomRatioFromCall(call, result)
+            "captureFrame" -> captureFrame(result)
             "updateScanWindow" -> updateScanWindow(call, result)
             "setFocus" -> setFocus(call, result)
             else -> result.notImplemented()
@@ -218,6 +227,7 @@ class MobileScannerHandler(
         }
         val invertImage: Boolean = call.argument<Boolean>("invertImage") ?: false
         val initialZoom: Double? = call.argument<Double?>("initialZoom")
+        val initialZoomRatio: Double? = call.argument<Double?>("initialZoomRatio")
 
         // Optional text recognition configuration. When the map is missing
         // or `enabled == false`, text recognition stays off.
@@ -315,6 +325,8 @@ class MobileScannerHandler(
             textRecognitionRespectsScanWindow = textRecognitionRespectScanWindow,
             lumaCallback = if (lumaEnabled) lumaCallback else null,
             lumaThrottleMillis = lumaThrottleMs,
+            zoomRatioStateCallback = zoomRatioStateCallback,
+            initialZoomRatio = initialZoomRatio,
         )
     }
 
@@ -422,6 +434,33 @@ class MobileScannerHandler(
             return true
         } catch (e: ZoomWhenStopped) { }
         return false
+    }
+
+    private fun setZoomRatioFromCall(call: MethodCall, result: MethodChannel.Result) {
+        val ratio = call.argument<Number>("ratio")?.toDouble()
+        if (ratio == null) {
+            result.error(MobileScannerErrorCodes.GENERIC_ERROR, "The zoom ratio was missing.", null)
+            return
+        }
+        try {
+            mobileScanner!!.setZoomRatio(ratio)
+            result.success(null)
+        } catch (e: ZoomWhenStopped) {
+            result.error(
+                MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR, MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR_MESSAGE, null)
+        }
+    }
+
+    private fun captureFrame(result: MethodChannel.Result) {
+        val scanner = mobileScanner
+        if (scanner == null) {
+            result.error(MobileScannerErrorCodes.GENERIC_ERROR, "The camera is not running.", null)
+            return
+        }
+        scanner.captureFrame(
+            onFrame = { frame -> result.success(frame) },
+            onError = { message -> result.error(MobileScannerErrorCodes.GENERIC_ERROR, message, null) },
+        )
     }
 
     private fun resetScale(result: MethodChannel.Result) {

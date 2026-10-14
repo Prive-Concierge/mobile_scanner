@@ -21,10 +21,12 @@ import 'package:mobile_scanner/src/mobile_scanner_platform_interface.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
 import 'package:mobile_scanner/src/objects/luma_sampling.dart';
 import 'package:mobile_scanner/src/objects/mobile_scanner_state.dart';
+import 'package:mobile_scanner/src/objects/scanner_frame.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/switch_camera_option.dart';
 import 'package:mobile_scanner/src/objects/text_capture.dart';
 import 'package:mobile_scanner/src/objects/text_recognition_options.dart';
+import 'package:mobile_scanner/src/objects/zoom_ratio_state.dart';
 
 /// Sentinel value used to distinguish a caller-omitted `attachTimeout`
 /// (use [MobileScannerController.defaultAttachTimeout]) from an
@@ -48,6 +50,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     this.invertImage = false,
     this.autoZoom = false,
     this.initialZoom,
+    this.initialZoomRatio,
     this.textRecognition = TextRecognitionOptions.disabled,
     this.lumaSampling = LumaSampling.disabled,
   }) : detectionTimeoutMs =
@@ -146,6 +149,13 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   /// Android.
   final double? initialZoom;
 
+  /// The zoom ratio to start at, relative to the standard lens (`1.0` is
+  /// "1x"). Ignored when [initialZoom] is set.
+  ///
+  /// Only supported on iOS and Android. On iPhones whose back camera spans
+  /// an ultra-wide lens, the camera otherwise starts on the ultra-wide.
+  final double? initialZoomRatio;
+
   /// Configuration for the on-device text recognizer that runs alongside
   /// the barcode scanner on every camera frame.
   ///
@@ -207,6 +217,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
   StreamSubscription<double>? _lumaSubscription;
   StreamSubscription<TorchState>? _torchStateSubscription;
   StreamSubscription<double>? _zoomScaleSubscription;
+  StreamSubscription<ZoomRatioState>? _zoomRatioSubscription;
   StreamSubscription<DeviceOrientation>? _deviceOrientationSubscription;
 
   bool _isDisposed = false;
@@ -242,6 +253,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     unawaited(_lumaSubscription?.cancel());
     unawaited(_torchStateSubscription?.cancel());
     unawaited(_zoomScaleSubscription?.cancel());
+    unawaited(_zoomRatioSubscription?.cancel());
     unawaited(_deviceOrientationSubscription?.cancel());
 
     _barcodesSubscription = null;
@@ -249,6 +261,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     _lumaSubscription = null;
     _torchStateSubscription = null;
     _zoomScaleSubscription = null;
+    _zoomRatioSubscription = null;
     _deviceOrientationSubscription = null;
   }
 
@@ -321,6 +334,19 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
           }
 
           value = value.copyWith(zoomScale: zoomScale);
+        });
+
+    _zoomRatioSubscription = MobileScannerPlatform.instance.zoomRatioStateStream
+        .listen((zoom) {
+          if (_isDisposed) {
+            return;
+          }
+
+          value = value.copyWith(
+            zoomRatio: zoom.ratio,
+            minZoomRatio: zoom.min,
+            maxZoomRatio: zoom.max,
+          );
         });
 
     if (MobileScannerPlatform.instance
@@ -497,6 +523,53 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     await MobileScannerPlatform.instance.setZoomScale(clampedZoomScale);
   }
 
+  /// Set the zoom as a ratio of the standard lens, where `1.0` is "1x".
+  ///
+  /// Once the platform has reported a range, [ratio] is clamped to
+  /// [MobileScannerState.minZoomRatio] and
+  /// [MobileScannerState.maxZoomRatio]; the platform clamps it either way.
+  /// [animated] ramps the zoom smoothly (iOS), as for a preset tap.
+  ///
+  /// Does nothing if the camera is not running.
+  Future<void> setZoomRatio(double ratio, {bool animated = false}) async {
+    _throwIfNotInitialized();
+
+    if (!value.isRunning) {
+      return;
+    }
+
+    final rangeKnown = value.maxZoomRatio > value.minZoomRatio;
+    final target = rangeKnown
+        ? ratio.clamp(value.minZoomRatio, value.maxZoomRatio)
+        : ratio;
+
+    // When the platform has updated the zoom, it sends the new ratio
+    // through the zoom ratio state event stream.
+    await MobileScannerPlatform.instance.setZoomRatio(
+      target,
+      animated: animated,
+    );
+  }
+
+  /// Capture the frame the preview is showing as an upright JPEG.
+  ///
+  /// Throws a [MobileScannerException] if the camera is not running, or if
+  /// the platform could not produce a frame.
+  Future<ScannerFrame> captureFrame() async {
+    _throwIfNotInitialized();
+
+    if (!value.isRunning) {
+      throw const MobileScannerException(
+        errorCode: MobileScannerErrorCode.genericError,
+        errorDetails: MobileScannerErrorDetails(
+          message: 'The camera is not running.',
+        ),
+      );
+    }
+
+    return MobileScannerPlatform.instance.captureFrame();
+  }
+
   /// Set the focus point for the camera.
   ///
   /// The [position] must be a point between `0,0` and `1,1`, both inclusive.
@@ -658,6 +731,7 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
       invertImage: invertImage,
       autoZoom: autoZoom,
       initialZoom: initialZoom,
+      initialZoomRatio: initialZoomRatio,
       textRecognition: textRecognition,
       lumaSampling: lumaSampling,
     );

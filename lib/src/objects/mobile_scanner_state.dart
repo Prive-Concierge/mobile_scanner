@@ -23,6 +23,9 @@ class MobileScannerState {
     required this.zoomScale,
     required this.deviceOrientation,
     this.error,
+    this.zoomRatio = 1,
+    this.minZoomRatio = 1,
+    this.maxZoomRatio = 1,
   });
 
   /// Create a new [MobileScannerState] instance that is uninitialized.
@@ -80,6 +83,20 @@ class MobileScannerState {
   /// The current zoom scale of the camera.
   final double zoomScale;
 
+  /// The current zoom as a ratio of the standard lens (`1.0` is "1x").
+  ///
+  /// Stays `1.0` until the platform reports a ratio.
+  final double zoomRatio;
+
+  /// The smallest zoom ratio the camera supports, below `1.0` when it can
+  /// switch to an ultra-wide lens.
+  ///
+  /// Equals [maxZoomRatio] until the platform reports a range.
+  final double minZoomRatio;
+
+  /// The largest zoom ratio the camera offers.
+  final double maxZoomRatio;
+
   /// The current device UI orientation.
   final DeviceOrientation deviceOrientation;
 
@@ -102,6 +119,9 @@ class MobileScannerState {
     TorchState? torchState,
     DeviceOrientation? deviceOrientation,
     double? zoomScale,
+    double? zoomRatio,
+    double? minZoomRatio,
+    double? maxZoomRatio,
   }) {
     return MobileScannerState(
       availableCameras: availableCameras ?? this.availableCameras,
@@ -115,6 +135,9 @@ class MobileScannerState {
       torchState: torchState ?? this.torchState,
       deviceOrientation: deviceOrientation ?? this.deviceOrientation,
       zoomScale: zoomScale ?? this.zoomScale,
+      zoomRatio: zoomRatio ?? this.zoomRatio,
+      minZoomRatio: minZoomRatio ?? this.minZoomRatio,
+      maxZoomRatio: maxZoomRatio ?? this.maxZoomRatio,
     );
   }
 }

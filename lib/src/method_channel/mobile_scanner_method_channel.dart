@@ -17,8 +17,10 @@ import 'package:mobile_scanner/src/mobile_scanner_platform_interface.dart';
 import 'package:mobile_scanner/src/mobile_scanner_view_attributes.dart';
 import 'package:mobile_scanner/src/objects/barcode.dart';
 import 'package:mobile_scanner/src/objects/barcode_capture.dart';
+import 'package:mobile_scanner/src/objects/scanner_frame.dart';
 import 'package:mobile_scanner/src/objects/start_options.dart';
 import 'package:mobile_scanner/src/objects/text_capture.dart';
+import 'package:mobile_scanner/src/objects/zoom_ratio_state.dart';
 import 'package:mobile_scanner/src/utils/parse_device_orientation_extension.dart';
 
 /// An implementation of [MobileScannerPlatform] that uses method channels.
@@ -57,6 +59,18 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   /// The name of the zoom scale state event.
   @visibleForTesting
   static const String kZoomScaleStateEventName = 'zoomScaleState';
+
+  /// The name of the zoom ratio state event.
+  @visibleForTesting
+  static const String kZoomRatioStateEventName = 'zoomRatioState';
+
+  /// The name of the method that sets the zoom ratio.
+  @visibleForTesting
+  static const String kSetZoomRatioMethodName = 'setZoomRatio';
+
+  /// The name of the method that captures the latest camera frame.
+  @visibleForTesting
+  static const String kCaptureFrameMethodName = 'captureFrame';
 
   /// The name of the method that gets the camera authorization state.
   @visibleForTesting
@@ -341,6 +355,18 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   }
 
   @override
+  Stream<ZoomRatioState> get zoomRatioStateStream {
+    return eventsStream
+        .where((event) => event['name'] == kZoomRatioStateEventName)
+        .map(
+          (event) =>
+              ZoomRatioState.fromMap(event['data'] as Map<Object?, Object?>?),
+        )
+        .where((state) => state != null)
+        .cast<ZoomRatioState>();
+  }
+
+  @override
   Future<BarcodeCapture?> analyzeImage(
     String path, {
     List<BarcodeFormat> formats = const <BarcodeFormat>[],
@@ -444,6 +470,31 @@ class MethodChannelMobileScanner extends MobileScannerPlatform {
   @override
   Future<void> setZoomScale(double zoomScale) async {
     await methodChannel.invokeMethod<void>(kSetScaleMethodName, zoomScale);
+  }
+
+  @override
+  Future<void> setZoomRatio(double ratio, {bool animated = false}) async {
+    await methodChannel.invokeMethod<void>(kSetZoomRatioMethodName, {
+      'ratio': ratio,
+      'animated': animated,
+    });
+  }
+
+  @override
+  Future<ScannerFrame> captureFrame() async {
+    final result = await methodChannel.invokeMapMethod<Object?, Object?>(
+      kCaptureFrameMethodName,
+    );
+    final frame = ScannerFrame.fromMap(result);
+    if (frame == null) {
+      throw const MobileScannerException(
+        errorCode: MobileScannerErrorCode.genericError,
+        errorDetails: MobileScannerErrorDetails(
+          message: 'The platform returned no camera frame.',
+        ),
+      );
+    }
+    return frame;
   }
 
   @override

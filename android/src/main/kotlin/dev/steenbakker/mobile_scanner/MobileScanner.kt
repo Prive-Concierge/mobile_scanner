@@ -49,9 +49,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
 class MobileScanner(
@@ -107,6 +109,19 @@ class MobileScanner(
     private var lumaThrottleMs: Long = 500
     @Volatile private var lumaNextRunAt: Long = 0L
     private var lumaCallback: ((Double) -> Unit)? = null
+
+    /// Zoom ratio listener, alongside the linear zoom one.
+    private var zoomRatioStateCallback: ZoomRatioStateCallback? = null
+
+    /// A frame grab waiting for the next analysis frame. It is served before
+    /// the detection throttle, so it never waits on barcode or text timing.
+    private val pendingFrameCapture = AtomicReference<PendingFrameCapture?>(null)
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private class PendingFrameCapture(
+        val onFrame: FrameCaptureCallback,
+        val onError: (String) -> Unit,
+    )
 
     companion object {
         // Configure the `ProcessCameraProvider` to only log errors.
@@ -194,6 +209,8 @@ class MobileScanner(
     @ExperimentalGetImage
     val captureOutput = ImageAnalysis.Analyzer { imageProxy ->
         val mediaImage = imageProxy.image ?: return@Analyzer
+
+        pendingFrameCapture.getAndSet(null)?.let { serveFrameCapture(imageProxy, it) }
 
         if (detectionSpeed == DetectionSpeed.NORMAL && scannerTimeout) {
             imageProxy.close()
@@ -681,7 +698,10 @@ class MobileScanner(
         textRecognitionRespectsScanWindow: Boolean = true,
         lumaCallback: ((Double) -> Unit)? = null,
         lumaThrottleMillis: Long = 500L,
+        zoomRatioStateCallback: ZoomRatioStateCallback? = null,
+        initialZoomRatio: Double? = null,
     ) {
+        this.zoomRatioStateCallback = zoomRatioStateCallback
         this.detectionSpeed = detectionSpeed
         this.detectionTimeout = detectionTimeout
         this.returnImage = returnImage
@@ -808,6 +828,11 @@ class MobileScanner(
                 // Register the zoom scale listener
                 it.cameraInfo.zoomState.observe(activity) { state ->
                     zoomScaleStateCallback(state.linearZoom.toDouble())
+                    this.zoomRatioStateCallback?.invoke(
+                        state.zoomRatio.toDouble(),
+                        state.minZoomRatio.toDouble(),
+                        state.maxZoomRatio.toDouble(),
+                    )
                 }
 
                 // Enable torch if provided
@@ -839,7 +864,7 @@ class MobileScanner(
                     // keeps the logical camera on the main lens.
                     // See https://issuetracker.google.com/issues/358257249.
                     try {
-                        it.cameraControl.setZoomRatio(1f)
+                        it.cameraControl.setZoomRatio(clampedZoomRatio(it, initialZoomRatio ?: 1.0))
                     } catch (_: Exception) {
                         // Best-effort: 1.0x is valid on every device we know
                         // of, but a failure here must not abort start().
@@ -918,6 +943,7 @@ class MobileScanner(
         // Pause camera by unbinding all use cases
         cameraProvider?.unbindAll()
         isPaused = true
+        failPendingFrameCapture("The camera was paused.")
     }
 
 //    private fun resumeCamera() {
@@ -964,6 +990,9 @@ class MobileScanner(
         lumaEnabled = false
         lumaCallback = null
         lumaNextRunAt = 0L
+
+        zoomRatioStateCallback = null
+        failPendingFrameCapture("The camera was stopped.")
 
         // Shutdown the analysis executor
         analysisExecutor.shutdown()
@@ -1082,8 +1111,55 @@ class MobileScanner(
     }
 
     fun setZoomRatio(zoomRatio: Double) {
-        if (camera == null) throw ZoomWhenStopped()
-        camera?.cameraControl?.setZoomRatio(zoomRatio.toFloat())
+        val cam = camera ?: throw ZoomWhenStopped()
+        cam.cameraControl.setZoomRatio(clampedZoomRatio(cam, zoomRatio))
+    }
+
+    /// CameraX fails an out-of-range ratio silently, so clamp it first.
+    private fun clampedZoomRatio(camera: Camera, zoomRatio: Double): Float {
+        val zoom = camera.cameraInfo.zoomState.value ?: return zoomRatio.toFloat()
+        return zoomRatio.toFloat().coerceIn(zoom.minZoomRatio, zoom.maxZoomRatio)
+    }
+
+    /**
+     * Write the next analysis frame to a temporary upright JPEG.
+     *
+     * The analysis frame shares the preview's field of view, so it can stand
+     * in for the preview when frozen. A newer request supersedes an older
+     * one; pausing or stopping the camera fails the pending one.
+     */
+    fun captureFrame(onFrame: FrameCaptureCallback, onError: (String) -> Unit) {
+        if (camera == null || imageAnalysis == null || isPaused) {
+            onError("The camera is not running.")
+            return
+        }
+        pendingFrameCapture.getAndSet(PendingFrameCapture(onFrame, onError))
+            ?.onError?.invoke("A newer frame capture replaced this one.")
+    }
+
+    private fun serveFrameCapture(imageProxy: ImageProxy, request: PendingFrameCapture) {
+        try {
+            val frame = imageProxy.toBitmap()
+            val upright = rotateBitmap(frame, imageProxy.imageInfo.rotationDegrees)
+            if (upright !== frame) frame.recycle()
+            val file = File.createTempFile("scan_frame_", ".jpg", activity.cacheDir)
+            file.outputStream().use { upright.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            val reply = mapOf<String, Any>(
+                "path" to file.absolutePath,
+                "width" to upright.width,
+                "height" to upright.height,
+            )
+            upright.recycle()
+            mainHandler.post { request.onFrame(reply) }
+        } catch (e: Exception) {
+            mainHandler.post { request.onError(e.message ?: "The camera frame could not be saved.") }
+        }
+    }
+
+    private fun failPendingFrameCapture(message: String) {
+        pendingFrameCapture.getAndSet(null)?.let { request ->
+            mainHandler.post { request.onError(message) }
+        }
     }
 
     /**

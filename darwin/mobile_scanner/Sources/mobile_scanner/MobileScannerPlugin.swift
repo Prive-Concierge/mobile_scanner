@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import Vision
 import VideoToolbox
 
@@ -144,6 +145,10 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
             getSupportedLenses(result)
         case "setScale":
             setScale(call, result)
+        case "setZoomRatio":
+            setZoomRatio(call, result)
+        case "captureFrame":
+            captureFrame(result)
         case "setFocus":
             setFocus(call, result)
         case "resetScale":
@@ -589,6 +594,7 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                 return nil
             }
         }()
+        let initialZoomRatio: CGFloat? = argReader.float(key: "initialZoomRatio").map { CGFloat($0) }
         symbologies = argReader.toSymbology()
         MobileScannerPlugin.returnImage = argReader.bool(key: "returnImage") ?? false
 
@@ -736,7 +742,12 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     } catch {
                         // Do nothing.
                     }
+                } else if let ratio = initialZoomRatio {
+                    try? self.setZoomRatioInternal(ratio, animated: false)
                 }
+                // The observer's initial event fired before
+                // `standardZoomFactor` was known, so its ratio was stale.
+                self.emitZoomRatioState()
        
 #if os(iOS)
                 // The height and width are swapped because the default video orientation for ios is landscape right, but mobile_scanner operates in portrait mode.
@@ -1008,6 +1019,138 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     
     func getScaleFromZoomFactor(actualScale: CGFloat) -> CGFloat {
         return (actualScale - 1) / 4
+    }
+
+    /// Largest zoom ratio offered, relative to the standard lens. Past this,
+    /// digital zoom only magnifies blur.
+    private static let maxZoomRatio: CGFloat = 10
+
+    /// The zoom ratios the camera can reach, relative to the standard lens:
+    /// below 1 when the device can switch to an ultra-wide lens.
+    private func zoomRatioRange(_ device: AVCaptureDevice) -> (min: CGFloat, max: CGFloat) {
+#if os(iOS)
+        let minRatio = device.minAvailableVideoZoomFactor / standardZoomFactor
+        let maxRatio = min(device.maxAvailableVideoZoomFactor / standardZoomFactor, MobileScannerPlugin.maxZoomRatio)
+        return (minRatio, max(minRatio, maxRatio))
+#else
+        return (1, 1)
+#endif
+    }
+
+    /// Sets the zoom as a ratio of the standard lens, where 1 is "1x".
+    private func setZoomRatio(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any]
+        guard let ratio = (args?["ratio"] as? NSNumber).map({ CGFloat(truncating: $0) }) else {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: "The zoom ratio was missing.",
+                                details: nil))
+            return
+        }
+        let animated = (args?["animated"] as? Bool) ?? false
+        do {
+            try setZoomRatioInternal(ratio, animated: animated)
+            result(nil)
+        } catch MobileScannerError.zoomWhenStopped {
+            result(FlutterError(code: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR,
+                                message: MobileScannerErrorCodes.SET_SCALE_WHEN_STOPPED_ERROR_MESSAGE,
+                                details: nil))
+        } catch MobileScannerError.zoomError(let error) {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: error.localizedDescription,
+                                details: nil))
+        } catch {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: MobileScannerErrorCodes.GENERIC_ERROR_MESSAGE,
+                                details: nil))
+        }
+    }
+
+    func setZoomRatioInternal(_ ratio: CGFloat, animated: Bool) throws {
+        guard let device = device else {
+            throw MobileScannerError.zoomWhenStopped
+        }
+#if os(iOS)
+        let range = zoomRatioRange(device)
+        let factor = min(max(ratio, range.min), range.max) * standardZoomFactor
+        do {
+            try device.lockForConfiguration()
+            if animated {
+                // Powers of two per second: 1x to 3x takes about a quarter second.
+                device.ramp(toVideoZoomFactor: factor, withRate: 6)
+            } else {
+                if device.isRampingVideoZoom {
+                    device.cancelVideoZoomRamp()
+                }
+                device.videoZoomFactor = factor
+            }
+            device.unlockForConfiguration()
+        } catch {
+            throw MobileScannerError.zoomError(error)
+        }
+#endif
+    }
+
+    /// Publishes the zoom as a ratio of the standard lens, with its range.
+    /// Must run on the main thread, like every event sent to Flutter.
+    private func emitZoomRatioState(zoomFactor: CGFloat? = nil) {
+#if os(iOS)
+        guard let device = device, standardZoomFactor > 0 else {
+            return
+        }
+        let range = zoomRatioRange(device)
+        let factor = zoomFactor ?? device.videoZoomFactor
+        sink?([
+            "name": "zoomRatioState",
+            "data": [
+                "ratio": Double(factor / standardZoomFactor),
+                "min": Double(range.min),
+                "max": Double(range.max),
+            ],
+        ])
+#endif
+    }
+
+    /// Writes the frame the preview is showing to a temporary JPEG.
+    ///
+    /// The video connection already rotates frames to the interface
+    /// orientation, so the pixels are upright without EXIF.
+    private func captureFrame(_ result: @escaping FlutterResult) {
+        guard let buffer = latestBuffer else {
+            result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                message: "No camera frame is available yet.",
+                                details: nil))
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fail: (String) -> Void = { message in
+                DispatchQueue.main.async {
+                    result(FlutterError(code: MobileScannerErrorCodes.GENERIC_ERROR,
+                                        message: message,
+                                        details: nil))
+                }
+            }
+            var cgImage: CGImage? = nil
+            let status = VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &cgImage)
+            guard status == noErr, let image = cgImage else {
+                fail("The camera frame could not be read.")
+                return
+            }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("scan_frame_\(UUID().uuidString).jpg")
+            guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else {
+                fail("The camera frame could not be encoded.")
+                return
+            }
+            let properties = [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary
+            CGImageDestinationAddImage(destination, image, properties)
+            guard CGImageDestinationFinalize(destination) else {
+                fail("The camera frame could not be written.")
+                return
+            }
+            DispatchQueue.main.async {
+                result(["path": url.path, "width": image.width, "height": image.height])
+            }
+        }
     }
 
     private func toggleTorch(_ result: @escaping FlutterResult) {
@@ -1433,12 +1576,21 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 #if os(iOS)
         case #keyPath(AVCaptureDevice.videoZoomFactor):
             if let zoomScale = change?[.newKey] as? CGFloat,
-               let device = object as? AVCaptureDevice {
-                
-                let scale = getScaleFromZoomFactor(actualScale: zoomScale)
+               object is AVCaptureDevice {
+                // A smooth zoom ramp reports from a capture thread.
+                let publish = { [weak self] in
+                    guard let self = self else { return }
+                    let scale = self.getScaleFromZoomFactor(actualScale: zoomScale)
 
-                let event: [String: Any?] = ["name": "zoomScaleState", "data":scale]
-                sink?(event)
+                    let event: [String: Any?] = ["name": "zoomScaleState", "data":scale]
+                    self.sink?(event)
+                    self.emitZoomRatioState(zoomFactor: zoomScale)
+                }
+                if Thread.isMainThread {
+                    publish()
+                } else {
+                    DispatchQueue.main.async(execute: publish)
+                }
             }
 #endif
         default:
