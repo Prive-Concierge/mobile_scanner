@@ -932,7 +932,9 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
                     do {
                         try device.lockForConfiguration()
                         device.focusPointOfInterest = focusPoint
-                        device.focusMode = .autoFocus
+                        device.focusMode = device.isFocusModeSupported(.continuousAutoFocus)
+                            ? .continuousAutoFocus
+                            : .autoFocus
                         device.unlockForConfiguration()
                     } catch {
                         throw MobileScannerError.zoomError(error)
