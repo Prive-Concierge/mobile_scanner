@@ -715,6 +715,12 @@ public class MobileScannerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
 
         captureSession!.commitConfiguration()
 
+        if let initialZoom {
+            try? setScaleInternal(initialZoom)
+        } else if let initialZoomRatio {
+            try? setZoomRatioInternal(initialZoomRatio, animated: false)
+        }
+
 #if os(iOS)
         // Set up observer to update video orientation when interface orientation changes
         setupInterfaceOrientationObserver()
